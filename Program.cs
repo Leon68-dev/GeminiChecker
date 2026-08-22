@@ -14,11 +14,12 @@ if (args.Length < 1)
     Console.WriteLine("Usage:");
     Console.WriteLine("  Split questions:          GeminiChecker <input_file_path>");
     Console.WriteLine("  Merge & Analyze folder:   GeminiChecker <input_directory_path>");
-    Console.WriteLine("  Verify file with Gemini:  GeminiChecker <input_file_path> --check (or -c) --key <api_key> [--model <model_name>]");
+    Console.WriteLine("  Verify file with Gemini:  GeminiChecker <input_file_path> --check (or -c) --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
     Console.WriteLine("\nOptions:");
     Console.WriteLine("  -c, --check               Trigger Gemini verification/correction mode on the specified file.");
     Console.WriteLine("  -k, --key <api_key>       Your Google AI Studio API Key (fallback: GEMINI_API_KEY environment variable).");
     Console.WriteLine("  -m, --model <model_name>  Select Gemini model name (default: gemini-3.6-flash).");
+    Console.WriteLine("  -p, --prompt <file_path>  Path to an external text file containing custom system prompt rules.");
     return;
 }
 
@@ -30,9 +31,10 @@ bool isCheckMode = args.Contains("--check", StringComparer.OrdinalIgnoreCase) ||
 
 string apiKey = string.Empty;
 string modelName = "gemini-3.6-flash"; // Default model
+string promptFilePath = string.Empty;  // Path to external prompt file
 string inputPath = null;
 
-// Search for key and model flags
+// Search for key flag
 int keyIndex = Array.FindIndex(args, arg => arg.Equals("--key", StringComparison.OrdinalIgnoreCase) ||
                                            arg.Equals("-k", StringComparison.OrdinalIgnoreCase));
 if (keyIndex != -1 && keyIndex + 1 < args.Length)
@@ -45,11 +47,20 @@ else
     apiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? string.Empty;
 }
 
+// Search for model flag
 int modelIndex = Array.FindIndex(args, arg => arg.Equals("--model", StringComparison.OrdinalIgnoreCase) ||
                                              arg.Equals("-m", StringComparison.OrdinalIgnoreCase));
 if (modelIndex != -1 && modelIndex + 1 < args.Length)
 {
     modelName = args[modelIndex + 1];
+}
+
+// Search for custom prompt file flag
+int promptIndex = Array.FindIndex(args, arg => arg.Equals("--prompt", StringComparison.OrdinalIgnoreCase) ||
+                                              arg.Equals("-p", StringComparison.OrdinalIgnoreCase));
+if (promptIndex != -1 && promptIndex + 1 < args.Length)
+{
+    promptFilePath = args[promptIndex + 1];
 }
 
 // Extract the input file or directory path (skip flags and their values)
@@ -66,6 +77,11 @@ for (int i = 0; i < args.Length; i++)
         continue;
     }
     if (arg.Equals("--model", StringComparison.OrdinalIgnoreCase) || arg.Equals("-m", StringComparison.OrdinalIgnoreCase))
+    {
+        i++; // Skip its value
+        continue;
+    }
+    if (arg.Equals("--prompt", StringComparison.OrdinalIgnoreCase) || arg.Equals("-p", StringComparison.OrdinalIgnoreCase))
     {
         i++; // Skip its value
         continue;
@@ -89,7 +105,7 @@ if (isCheckMode)
         Console.WriteLine($"Error: File '{inputPath}' not found for Gemini verification.");
         Environment.Exit(1);
     }
-    await VerifyWithGeminiAsync(inputPath, apiKey, modelName);
+    await VerifyWithGeminiAsync(inputPath, apiKey, modelName, promptFilePath);
 }
 else
 {
@@ -110,7 +126,7 @@ else
 // ==========================================
 // 1. GEMINI VERIFICATION LOGIC
 // ==========================================
-async Task VerifyWithGeminiAsync(string filePath, string apiToken, string selectedModel)
+async Task VerifyWithGeminiAsync(string filePath, string apiToken, string selectedModel, string promptPath)
 {
     if (string.IsNullOrWhiteSpace(apiToken))
     {
@@ -123,18 +139,34 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
         Console.WriteLine($"Reading file: {filePath}...");
         string originalJson = await File.ReadAllTextAsync(filePath);
 
+        string systemPrompt;
+
+        // Load custom prompt if file path is provided, otherwise fallback to default Java prompt
+        if (!string.IsNullOrWhiteSpace(promptPath))
+        {
+            if (!File.Exists(promptPath))
+            {
+                Console.WriteLine($"Error: Prompt file '{promptPath}' not found.");
+                Environment.Exit(1);
+            }
+            Console.WriteLine($"Loading system prompt rules from: {promptPath}...");
+            systemPrompt = await File.ReadAllTextAsync(promptPath);
+        }
+        else
+        {
+            Console.WriteLine("No custom prompt specified. Using default Java proofreader prompt...");
+            systemPrompt =
+                "You are an expert Java developer and proofreader. " +
+                "Your task is to review the following JSON array of quiz questions. " +
+                "1. Check for spelling, grammar, punctuation, and clear phrasing in all languages.\n" +
+                "2. Check for technical correctness (OOP, collections, syntax, JVM) of Java code inside questions/answers/explanations.\n" +
+                "3. Correct any errors you find.\n" +
+                "4. Output ONLY the updated JSON array. Do not write any explanations, greetings, introduction, or markdown block wrapping (like ```json). Just the raw JSON content.";
+        }
+
         Console.WriteLine($"Connecting to Gemini API using model: {selectedModel}...");
         var googleAI = new GoogleAI(apiKey: apiToken);
         var model = googleAI.GenerativeModel(model: selectedModel);
-
-        // Strict prompt to ensure Gemini behaves as a JSON parser/corrector
-        string systemPrompt =
-            "You are an expert Java developer and proofreader. " +
-            "Your task is to review the following JSON array of quiz questions. " +
-            "1. Check for spelling, grammar, punctuation, and clear phrasing in all languages.\n" +
-            "2. Check for technical correctness (OOP, collections, syntax, JVM) of Java code inside questions/answers/explanations.\n" +
-            "3. Correct any errors you find.\n" +
-            "4. Output ONLY the updated JSON array. Do not write any explanations, greetings, introduction, or markdown block wrapping (like ```json). Just the raw JSON content.";
 
         string fullPrompt = $"{systemPrompt}\n\nHere is the JSON to check:\n{originalJson}";
 
