@@ -675,12 +675,11 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
             return;
         }
 
-        // De-duplicate by unique key to prevent overlaps, then sort by group_index and question_id
+        // De-duplicate by unique key to prevent overlaps, then sort strictly by question_id
         var orderedQuestions = allQuestions
             .GroupBy(q => new { q.GroupIndex, q.QuestionId, Lang = q.Lang.ToLower().Trim() })
             .Select(g => g.First())
-            .OrderBy(q => q.GroupIndex)
-            .ThenBy(q => q.QuestionId)
+            .OrderBy(q => q.QuestionId)
             .ToList();
 
         // Create output filename with timestamp
