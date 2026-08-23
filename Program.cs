@@ -9,35 +9,43 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Mscc.GenerativeAI;
 
-// ---------------------------------------------------------
-// CLI ARGUMENT AND PARAMETER HANDLING
-// ---------------------------------------------------------
 if (args.Length < 1)
 {
     Console.WriteLine("Usage:");
-    Console.WriteLine("  Split questions:          GeminiChecker <input_file_path>");
+    Console.WriteLine("  Split questions:          GeminiChecker <input_file_path> [--split (or -spl)] [--count <int>]");
     Console.WriteLine("  Merge & Analyze folder:   GeminiChecker <input_directory_path>");
     Console.WriteLine("  Verify file with Gemini:  GeminiChecker <input_file_path> --check (or -c) --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
     Console.WriteLine("  Generate questions:       GeminiChecker --generate (or -gen) --topics <topics_json_path> --group <index> --count <int> --level <junior/middle> --start-id <int> --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
     Console.WriteLine("\nOptions:");
+    Console.WriteLine("  -spl, --split             Explicitly trigger split mode on the specified file.");
     Console.WriteLine("  -c, --check               Trigger Gemini verification/correction mode on the specified file.");
     Console.WriteLine("  -gen, --generate          Trigger Gemini question generation mode.");
     Console.WriteLine("  -t, --topics <path>       Path to topics.json file for subject matter matching.");
-    Console.WriteLine("  -g, -grp, --group <idx>   Target group index for generation (default: 0).");
-    Console.WriteLine("  -cnt, --count <int>       Number of unique questions to generate (default: 8).");
-    Console.WriteLine("  -l, --level <string>      Difficulty level (junior, middle, senior) (default: junior).");
-    Console.WriteLine("  -s, --start-id <int>      Starting question ID (default: 1).");
+    Console.WriteLine("  -g, -grp, --group <idx>   Target group index (topic) for generation (default: 0).");
+    Console.WriteLine("  -cnt, --count <int>       Number of unique questions per chunk (for split mode) or to generate (default: 8).");
+    Console.WriteLine("  -l, --level <string>      Difficulty level (e.g., junior, middle, senior) (default: junior).");
+    Console.WriteLine("  -s, --start-id <int>      Starting question_id for newly generated questions (default: 1).");
     Console.WriteLine("  -k, --key <api_key>       Your Google AI Studio API Key (fallback: GEMINI_API_KEY environment variable).");
     Console.WriteLine("  -m, --model <model_name>  Select Gemini model name (default: gemini-3.6-flash).");
     Console.WriteLine("  -p, --prompt <file_path>  Path to an external text file containing custom system prompt rules.");
     return;
 }
 
-bool isGenerateMode = false;
-bool isCheckMode = false;
+// ---------------------------------------------------------
+// PARAMETERS PARSING LOGIC
+// ---------------------------------------------------------
+bool isGenerateMode = args.Contains("--generate", StringComparer.OrdinalIgnoreCase) ||
+                      args.Contains("-gen", StringComparer.OrdinalIgnoreCase);
+
+bool isCheckMode = args.Contains("--check", StringComparer.OrdinalIgnoreCase) ||
+                   args.Contains("-c", StringComparer.OrdinalIgnoreCase);
+
+bool isSplitMode = args.Contains("--split", StringComparer.OrdinalIgnoreCase) ||
+                   args.Contains("-spl", StringComparer.OrdinalIgnoreCase);
+
 string topicsPath = string.Empty;
 int groupIndex = 0;
-int count = 8;
+int count = 8; // Reused as chunkSize in split mode and questionCount in generate mode
 string level = "junior";
 int startId = 1;
 string promptFilePath = string.Empty;
@@ -45,91 +53,176 @@ string apiKey = string.Empty;
 string modelName = "gemini-3.6-flash";
 string inputPath = null;
 
-// Parse CLI flags and values
+// Search for topics spec flag
+int topicsIndex = Array.FindIndex(args, arg => arg.Equals("--topics", StringComparison.OrdinalIgnoreCase) ||
+                                              arg.Equals("-t", StringComparison.OrdinalIgnoreCase));
+if (topicsIndex != -1 && topicsIndex + 1 < args.Length)
+{
+    topicsPath = args[topicsIndex + 1];
+}
+
+// Search for group index flag
+int groupIndexParsed = Array.FindIndex(args, arg => arg.Equals("--group", StringComparison.OrdinalIgnoreCase) ||
+                                                   arg.Equals("-g", StringComparison.OrdinalIgnoreCase) ||
+                                                   arg.Equals("-grp", StringComparison.OrdinalIgnoreCase));
+if (groupIndexParsed != -1 && groupIndexParsed + 1 < args.Length)
+{
+    if (int.TryParse(args[groupIndexParsed + 1], out int gIdx)) groupIndex = gIdx;
+}
+
+// Search for count / chunk size flag
+int countIndex = Array.FindIndex(args, arg => arg.Equals("--count", StringComparison.OrdinalIgnoreCase) ||
+                                             arg.Equals("-cnt", StringComparison.OrdinalIgnoreCase));
+if (countIndex != -1 && countIndex + 1 < args.Length)
+{
+    if (int.TryParse(args[countIndex + 1], out int cnt)) count = cnt;
+}
+
+// Search for level flag
+int levelIndex = Array.FindIndex(args, arg => arg.Equals("--level", StringComparison.OrdinalIgnoreCase) ||
+                                             arg.Equals("-l", StringComparison.OrdinalIgnoreCase));
+if (levelIndex != -1 && levelIndex + 1 < args.Length)
+{
+    level = args[levelIndex + 1];
+}
+
+// Search for start ID flag
+int startIdIndex = Array.FindIndex(args, arg => arg.Equals("--start-id", StringComparison.OrdinalIgnoreCase) ||
+                                               arg.Equals("-s", StringComparison.OrdinalIgnoreCase));
+if (startIdIndex != -1 && startIdIndex + 1 < args.Length)
+{
+    if (int.TryParse(args[startIdIndex + 1], out int sid)) startId = sid;
+}
+
+// Search for prompt guidelines flag
+int promptIndex = Array.FindIndex(args, arg => arg.Equals("--prompt", StringComparison.OrdinalIgnoreCase) ||
+                                              arg.Equals("-p", StringComparison.OrdinalIgnoreCase));
+if (promptIndex != -1 && promptIndex + 1 < args.Length)
+{
+    promptFilePath = args[promptIndex + 1];
+}
+
+// Search for key flag
+int keyIndex = Array.FindIndex(args, arg => arg.Equals("--key", StringComparison.OrdinalIgnoreCase) ||
+                                           arg.Equals("-k", StringComparison.OrdinalIgnoreCase));
+if (keyIndex != -1 && keyIndex + 1 < args.Length)
+{
+    apiKey = args[keyIndex + 1];
+}
+else
+{
+    // Try to fallback to environment variable for convenience
+    apiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? string.Empty;
+}
+
+// Search for model flag
+int modelIndex = Array.FindIndex(args, arg => arg.Equals("--model", StringComparison.OrdinalIgnoreCase) ||
+                                             arg.Equals("-m", StringComparison.OrdinalIgnoreCase));
+if (modelIndex != -1 && modelIndex + 1 < args.Length)
+{
+    modelName = args[modelIndex + 1];
+}
+
+// Extract the input file or directory path (skip flags and their values)
 for (int i = 0; i < args.Length; i++)
 {
     string arg = args[i];
     if (arg.Equals("--generate", StringComparison.OrdinalIgnoreCase) || arg.Equals("-gen", StringComparison.OrdinalIgnoreCase))
     {
-        isGenerateMode = true;
+        continue;
     }
-    else if (arg.Equals("--check", StringComparison.OrdinalIgnoreCase) || arg.Equals("-c", StringComparison.OrdinalIgnoreCase))
+    if (arg.Equals("--check", StringComparison.OrdinalIgnoreCase) || arg.Equals("-c", StringComparison.OrdinalIgnoreCase))
     {
-        isCheckMode = true;
+        continue;
     }
-    else if ((arg.Equals("--topics", StringComparison.OrdinalIgnoreCase) || arg.Equals("-t", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
+    if (arg.Equals("--split", StringComparison.OrdinalIgnoreCase) || arg.Equals("-spl", StringComparison.OrdinalIgnoreCase))
     {
-        topicsPath = args[++i];
+        continue;
     }
-    else if ((arg.Equals("--group", StringComparison.OrdinalIgnoreCase) || arg.Equals("-g", StringComparison.OrdinalIgnoreCase) || arg.Equals("-grp", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
+    if (arg.Equals("--topics", StringComparison.OrdinalIgnoreCase) || arg.Equals("-t", StringComparison.OrdinalIgnoreCase))
     {
-        if (int.TryParse(args[++i], out int gIdx)) groupIndex = gIdx;
+        i++; // Skip its value
+        continue;
     }
-    else if ((arg.Equals("--count", StringComparison.OrdinalIgnoreCase) || arg.Equals("-cnt", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
+    if (arg.Equals("--group", StringComparison.OrdinalIgnoreCase) || arg.Equals("-g", StringComparison.OrdinalIgnoreCase) || arg.Equals("-grp", StringComparison.OrdinalIgnoreCase))
     {
-        if (int.TryParse(args[++i], out int cnt)) count = cnt;
+        i++; // Skip its value
+        continue;
     }
-    else if ((arg.Equals("--level", StringComparison.OrdinalIgnoreCase) || arg.Equals("-l", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
+    if (arg.Equals("--count", StringComparison.OrdinalIgnoreCase) || arg.Equals("-cnt", StringComparison.OrdinalIgnoreCase))
     {
-        level = args[++i];
+        i++; // Skip its value
+        continue;
     }
-    else if ((arg.Equals("--start-id", StringComparison.OrdinalIgnoreCase) || arg.Equals("-s", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
+    if (arg.Equals("--level", StringComparison.OrdinalIgnoreCase) || arg.Equals("-l", StringComparison.OrdinalIgnoreCase))
     {
-        if (int.TryParse(args[++i], out int sid)) startId = sid;
+        i++; // Skip its value
+        continue;
     }
-    else if ((arg.Equals("--prompt", StringComparison.OrdinalIgnoreCase) || arg.Equals("-p", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
+    if (arg.Equals("--start-id", StringComparison.OrdinalIgnoreCase) || arg.Equals("-s", StringComparison.OrdinalIgnoreCase))
     {
-        promptFilePath = args[++i];
+        i++; // Skip its value
+        continue;
     }
-    else if ((arg.Equals("--key", StringComparison.OrdinalIgnoreCase) || arg.Equals("-k", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
+    if (arg.Equals("--prompt", StringComparison.OrdinalIgnoreCase) || arg.Equals("-p", StringComparison.OrdinalIgnoreCase))
     {
-        apiKey = args[++i];
+        i++; // Skip its value
+        continue;
     }
-    else if ((arg.Equals("--model", StringComparison.OrdinalIgnoreCase) || arg.Equals("-m", StringComparison.OrdinalIgnoreCase)) && i + 1 < args.Length)
+    if (arg.Equals("--key", StringComparison.OrdinalIgnoreCase) || arg.Equals("-k", StringComparison.OrdinalIgnoreCase))
     {
-        modelName = args[++i];
+        i++; // Skip its value
+        continue;
     }
-    else if (!arg.StartsWith("-"))
+    if (arg.Equals("--model", StringComparison.OrdinalIgnoreCase) || arg.Equals("-m", StringComparison.OrdinalIgnoreCase))
     {
-        inputPath = arg;
+        i++; // Skip its value
+        continue;
     }
+
+    inputPath = arg;
+    break;
 }
 
-// Fallback to environment variable if API key wasn't supplied via CLI
-if (string.IsNullOrEmpty(apiKey))
+if (string.IsNullOrEmpty(inputPath) && !isGenerateMode)
 {
-    apiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? string.Empty;
+    Console.WriteLine("Error: Missing input file or directory path.");
+    Environment.Exit(1);
 }
 
-// Route to appropriate functionality based on mode
+// Router to appropriate functionality based on inputs
 if (isGenerateMode)
 {
     await GenerateQuestionsAsync(topicsPath, groupIndex, count, level, startId, apiKey, modelName, promptFilePath);
 }
 else if (isCheckMode)
 {
-    if (string.IsNullOrEmpty(inputPath) || !File.Exists(inputPath))
+    if (!File.Exists(inputPath))
     {
-        Console.WriteLine($"Error: Input file '{inputPath}' not found for Gemini verification.");
+        Console.WriteLine($"Error: File '{inputPath}' not found for Gemini verification.");
         Environment.Exit(1);
     }
     await VerifyWithGeminiAsync(inputPath, apiKey, modelName, promptFilePath);
 }
-else
+else if (isSplitMode)
 {
-    if (string.IsNullOrEmpty(inputPath))
+    if (!File.Exists(inputPath))
     {
-        Console.WriteLine("Error: Missing input path.");
+        Console.WriteLine($"Error: Input file '{inputPath}' not found for splitting.");
         Environment.Exit(1);
     }
-
+    await SplitQuestionsAsync(inputPath, count);
+}
+else
+{
+    // Backwards-compatible auto-detect router when no explicit split/check/generate flags are passed
     if (Directory.Exists(inputPath))
     {
         await MergeAndAnalyzeAsync(inputPath);
     }
     else if (File.Exists(inputPath))
     {
-        await SplitQuestionsAsync(inputPath);
+        await SplitQuestionsAsync(inputPath, count);
     }
     else
     {
@@ -138,7 +231,7 @@ else
 }
 
 // ==========================================
-// 1. GEMINI GENERATION LOGIC (NEW)
+// 1. GEMINI GENERATION LOGIC
 // ==========================================
 async Task GenerateQuestionsAsync(string tPath, int gIdx, int qCount, string qLevel, int sId, string apiToken, string selectedModel, string promptPath)
 {
@@ -578,7 +671,7 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
 // ==========================================
 // 4. SPLIT LOGIC
 // ==========================================
-async Task SplitQuestionsAsync(string filePath)
+async Task SplitQuestionsAsync(string filePath, int chunkSize)
 {
     try
     {
@@ -615,7 +708,7 @@ async Task SplitQuestionsAsync(string filePath)
         string fileNameWithoutExt = Path.GetFileNameWithoutExtension(filePath).ToLower();
         string extension = Path.GetExtension(filePath).ToLower();
 
-        Console.WriteLine("Splitting data by 'group_index' and grouping by ID ranges [1-8], [9-16]...");
+        Console.WriteLine($"Splitting data by 'group_index' and grouping by ID ranges [1-{chunkSize}], [{chunkSize + 1}-{chunkSize * 2}]...");
 
         var writeOptions = new JsonSerializerOptions
         {
@@ -627,16 +720,16 @@ async Task SplitQuestionsAsync(string filePath)
         {
             var groupQuestions = group.ToList();
 
-            // Group questions of this group by their ID range blocks
+            // Group questions of this group by their ID range blocks dynamically using chunkSize
             var idBlocks = groupQuestions
-                .GroupBy(q => (q.QuestionId - 1) / 8)
+                .GroupBy(q => (q.QuestionId - 1) / chunkSize)
                 .OrderBy(g => g.Key);
 
             foreach (var idBlock in idBlocks)
             {
                 int blockKey = idBlock.Key;
 
-                int startIndex = (blockKey * 8) + 1;
+                int startIndex = (blockKey * chunkSize) + 1;
 
                 // Format startIndex with the dynamically calculated padding width, e.g. "D3" for 3 digits
                 string paddedStartIndex = startIndex.ToString("D" + width);
@@ -648,7 +741,7 @@ async Task SplitQuestionsAsync(string filePath)
                 string outputJson = JsonSerializer.Serialize(blockList, writeOptions);
                 await File.WriteAllTextAsync(groupFilePath, outputJson);
 
-                Console.WriteLine($"Created file: {groupFilePath} ({blockList.Count} records, ID range: {startIndex} to {startIndex + 7})");
+                Console.WriteLine($"Created file: {groupFilePath} ({blockList.Count} records, ID range: {startIndex} to {startIndex + chunkSize - 1})");
             }
         }
 
