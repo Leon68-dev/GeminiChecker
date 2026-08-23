@@ -21,10 +21,10 @@ Result: Chunk files like questions_0_0001.json, questions_0_0011.json, questions
 Sends a specific chunk file directly to Google Gemini to review and correct grammar across all 5 languages, verify Java code execution, technical logic, and explanations. The corrected output is saved to a new file with the _chn suffix (e.g., questions_0_0001_chn.json).
 
 # Verify a file by passing your Google AI Studio API key
-dotnet run -- "D:\DevTools\questions_0_0001.json" --check --key "AI_STUDIO_KEY"
+dotnet run -- "D:\DevTools\questions_0_0001.json" --check --key "AIzaSyDcyRZvu-c1j2d70RJPrEfVXDt9X0M3jUg"
 
 # Verify using a custom AI guidelines file (-p) and a specific model (-m)
-dotnet run -- "D:\DevTools\questions_0_0001.json" -c -k "AI_STUDIO_KEY" -p "D:\DevTools\java_rules.txt" -m "gemini-3.6-flash"
+dotnet run -- "D:\DevTools\questions_0_0001.json" -c -k "AIzaSyDcyRZvu-c1j2d70RJPrEfVXDt9X0M3jUg" -p "D:\DevTools\java_rules.txt" -m "gemini-3.6-flash"
 3. Merging Chunk Files & Stats Analysis (Merge & Stats Mode)
 Scans and aggregates all small chunk files inside the specified directory. If a file has a version with the _chn.json suffix, the original file is ignored and the corrected version is processed instead. All data is automatically sorted, de-duplicated, merged into a single master file questions_yyyy-MM-dd_HH-mm-ss.json, and comprehensive statistics are printed.
 
@@ -34,10 +34,10 @@ dotnet run -- "D:\DevTools\"
 Generates new, unique quiz questions using AI. The program dynamically loads the topic name from topics.json for the specified group index in all 5 languages, automatically scans the directory for existing questions to compile a blacklist (strictly preventing duplicates), and saves a new chunk file with proper padding.
 
 # Generate 8 new junior-level questions for group 0, starting with ID 513
-dotnet run -- --generate --topics "D:\DevTools\topics.json" --group 0 --count 8 --level junior --start-id 513 --key "AI_STUDIO_KEY"
+dotnet run -- --generate --topics "D:\DevTools\topics.json" --group 0 --count 8 --level junior --start-id 513 --key "AIzaSyDcyRZvu-c1j2d70RJPrEfVXDt9X0M3jUg"
 
 # Generate using custom guidelines loaded from an external text file (-p)
-dotnet run -- -gen -t "D:\DevTools\topics.json" -g 0 -cnt 8 -l middle -s 513 -k "AI_STUDIO_KEY" -p "D:\DevTools\python_rules.txt"
+dotnet run -- -gen -t "D:\DevTools\topics.json" -g 0 -cnt 8 -l middle -s 513 -k "AIzaSyDcyRZvu-c1j2d70RJPrEfVXDt9X0M3jUg" -p "D:\DevTools\python_rules.txt"
 Command Line Options & Flags:
 -spl, --split Explicitly triggers splitting mode on the specified file.
 -c, --check Enables AI verification and correction mode on the specified file.

@@ -1,4 +1,6 @@
-﻿using System;
+﻿using Mscc.GenerativeAI;
+using Mscc.GenerativeAI.Types;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -7,7 +9,6 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using Mscc.GenerativeAI;
 
 if (args.Length < 1)
 {
@@ -335,7 +336,7 @@ async Task GenerateQuestionsAsync(string tPath, int gIdx, int qCount, string qLe
         else
         {
             Console.WriteLine("No custom generation guidelines specified. Using default educator guidelines...");
-            systemPrompt = "You are an expert developer, educator, and technical quiz creator.";
+            systemPrompt = "You are an expert educator, scholar, and quiz creator.";
         }
 
         string generationInstruction =
@@ -350,7 +351,7 @@ async Task GenerateQuestionsAsync(string tPath, int gIdx, int qCount, string qLe
             $"2. 'lang' must be exactly 'en', 'uk', 'de', 'es', or 'fr'.\n" +
             $"3. 'level' must be exactly '{qLevel}'.\n" +
             $"4. 'group_index' must be exactly {gIdx}.\n" +
-            $"5. 'question' should be clear, technical, and accurate. Code snippets can be used where relevant.\n" +
+            $"5. 'question' should be clear, factual, and accurate. Use domain-specific terminology, historical dates, formulas, code snippets, or relevant examples where necessary.\n" +
             $"6. 'answer_a', 'answer_b', 'answer_c', 'answer_d' must contain the choices.\n" +
             $"7. 'answer_win' must be exactly 'a', 'b', 'c', or 'd'. It must be identical across all 5 translations for that question_id.\n" +
             $"8. 'explanation' must explain why the winning answer is correct.\n\n" +
@@ -363,8 +364,14 @@ async Task GenerateQuestionsAsync(string tPath, int gIdx, int qCount, string qLe
         var googleAI = new GoogleAI(apiKey: apiToken);
         var model = googleAI.GenerativeModel(model: selectedModel);
 
+        // Configure generation parameters to unlock the maximum output capacity of 65,536 tokens
+        var generationConfig = new GenerationConfig
+        {
+            MaxOutputTokens = 65536
+        };
+
         Console.WriteLine("Generating questions via Gemini. Please wait...");
-        var response = await model.GenerateContent(fullPrompt);
+        var response = await model.GenerateContent(fullPrompt, generationConfig: generationConfig);
 
         if (response == null || string.IsNullOrWhiteSpace(response.Text))
         {
@@ -447,9 +454,16 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
         Console.WriteLine($"Reading file: {filePath}...");
         string originalJson = await File.ReadAllTextAsync(filePath);
 
+        // Strict non-negotiable format rules that ensure Gemini never breaks the output JSON structure
+        string strictFormatRules =
+            "CRITICAL INSTRUCTIONS FOR OUTPUT FORMAT:\n" +
+            "1. You MUST return ALL questions and ALL translations from the input. Do NOT abbreviate, truncate, or omit any questions, languages, or fields.\n" +
+            "2. The output JSON array must contain the exact same number of items as the input, with all fields preserved and only corrected where necessary.\n" +
+            "3. Output ONLY the updated JSON array. Do NOT write any explanations, conversational filler, greetings, introductions, or markdown block wrapping (like ```json). Return just the raw JSON content.";
+
         string systemPrompt;
 
-        // Load custom prompt if file path is provided, otherwise fallback to default Java prompt
+        // Load custom prompt if file path is provided, otherwise fallback to default proofreader prompt
         if (!string.IsNullOrWhiteSpace(promptPath))
         {
             if (!File.Exists(promptPath))
@@ -458,28 +472,42 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
                 Environment.Exit(1);
             }
             Console.WriteLine($"Loading system prompt rules from: {promptPath}...");
-            systemPrompt = await File.ReadAllTextAsync(promptPath);
+            string customRules = await File.ReadAllTextAsync(promptPath);
+
+            // Integrate custom domain rules with the strict formatting requirements
+            systemPrompt =
+                "You are an expert educator, researcher, and proofreader.\n" +
+                "Evaluate the questions using the following specific criteria and subject matter rules:\n" +
+                $"{customRules}\n\n" +
+                "Additionally, check for spelling, grammar, punctuation, and clear phrasing in all languages.\n\n" +
+                strictFormatRules;
         }
         else
         {
-            Console.WriteLine("No custom prompt specified. Using default Java proofreader prompt...");
+            Console.WriteLine("No custom prompt specified. Using default proofreader prompt...");
             systemPrompt =
-                "You are an expert Java developer and proofreader. " +
-                "Your task is to review the following JSON array of quiz questions. " +
+                "You are an expert educator, researcher, and proofreader. " +
+                "Your task is to review the following JSON array of quiz questions.\n" +
                 "1. Check for spelling, grammar, punctuation, and clear phrasing in all languages.\n" +
-                "2. Check for technical correctness (OOP, collections, syntax, JVM) of Java code inside questions/answers/explanations.\n" +
-                "3. Correct any errors you find.\n" +
-                "4. Output ONLY the updated JSON array. Do not write any explanations, greetings, introduction, or markdown block wrapping (like ```json). Just the raw JSON content.";
+                "2. Check for factual, logical, and conceptual correctness of the questions, answer choices, and explanations.\n" +
+                "3. Correct any errors or inaccuracies you find.\n\n" +
+                strictFormatRules;
         }
 
         Console.WriteLine($"Connecting to Gemini API using model: {selectedModel}...");
         var googleAI = new GoogleAI(apiKey: apiToken);
         var model = googleAI.GenerativeModel(model: selectedModel);
 
+        // Configure generation parameters to unlock the maximum output capacity of 65,536 tokens
+        var generationConfig = new GenerationConfig
+        {
+            MaxOutputTokens = 65536
+        };
+
         string fullPrompt = $"{systemPrompt}\n\nHere is the JSON to check:\n{originalJson}";
 
         Console.WriteLine("Sending data to Gemini for review. Please wait...");
-        var response = await model.GenerateContent(fullPrompt);
+        var response = await model.GenerateContent(fullPrompt, generationConfig: generationConfig);
 
         if (response == null || string.IsNullOrWhiteSpace(response.Text))
         {
@@ -489,38 +517,70 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
 
         string processedJson = response.Text.Trim();
 
-        // Clean up markdown code blocks if Gemini wraps it in ```json ... ``` anyway
-        if (processedJson.StartsWith("```"))
+        // Check if the response contains a JSON array
+        int firstBracket = processedJson.IndexOf('[');
+        int lastBracket = processedJson.LastIndexOf(']');
+
+        if (firstBracket == -1 || lastBracket == -1 || lastBracket <= firstBracket)
         {
-            // Remove starting ```json or ```
-            int firstLineEnd = processedJson.IndexOf('\n');
-            if (firstLineEnd != -1)
+            // Check if Gemini returned conversational text indicating that everything is already correct
+            string lowerText = processedJson.ToLowerInvariant();
+            bool isAlreadyCorrect = lowerText.Contains("correct") ||
+                                     lowerText.Contains("no changes") ||
+                                     lowerText.Contains("looks good") ||
+                                     lowerText.Contains("no errors") ||
+                                     lowerText.Contains("perfect") ||
+                                     lowerText.Contains("already");
+
+            if (isAlreadyCorrect)
             {
-                processedJson = processedJson.Substring(firstLineEnd).Trim();
+                Console.WriteLine("No changes detected.");
+                return; // Gracefully exit without generating a _chn file
             }
-            // Remove ending ```
-            if (processedJson.EndsWith("```"))
-            {
-                processedJson = processedJson.Substring(0, processedJson.Length - 3).Trim();
-            }
+
+            Console.WriteLine("\n[ERROR] Gemini did not return a valid JSON array.");
+            Console.WriteLine("Response received from Gemini:");
+            Console.WriteLine(processedJson);
+            Environment.Exit(1);
         }
+
+        // Extract the JSON array cleanly
+        processedJson = processedJson.Substring(firstBracket, lastBracket - firstBracket + 1);
 
         // Verify if it is a valid JSON before saving
         try
         {
             using var doc = JsonDocument.Parse(processedJson);
         }
-        catch (JsonException)
+        catch (JsonException ex)
         {
-            Console.WriteLine("Error: Response from Gemini is not a valid JSON. Response text was:");
-            Console.WriteLine(processedJson);
+            Console.WriteLine("\n[ERROR] Response from Gemini is not a valid JSON structure.");
+            Console.WriteLine($"Details: {ex.Message}");
+            if (ex.LineNumber.HasValue)
+            {
+                Console.WriteLine($"Line: {ex.LineNumber.Value}, Position: {ex.BytePositionInLine}");
+            }
+
+            // Print raw response ONLY if it is not a giant questions dump to avoid spamming the console
+            bool isQuestionsDump = response.Text.Contains("question_id") || response.Text.Contains("explanation");
+            if (!isQuestionsDump)
+            {
+                Console.WriteLine("\nRaw response received from Gemini (which is not a JSON array of questions):");
+                Console.WriteLine(response.Text.Trim());
+            }
+            else
+            {
+                Console.WriteLine("\n(The response contains a corrupted questions array. To avoid spamming, the raw JSON is not printed.)");
+            }
+
+            Console.WriteLine("Please fix the prompt rules or verify the source data size.");
             Environment.Exit(1); // Exit the program on JSON validation error
         }
 
         // Check if any changes were made
         if (originalJson.Trim() == processedJson)
         {
-            Console.WriteLine("No changes needed. The file is already perfect!");
+            Console.WriteLine("No changes detected.");
         }
         else
         {
@@ -533,9 +593,7 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
             string outputPath = Path.Combine(directory, outputFileName);
 
             await File.WriteAllTextAsync(outputPath, processedJson);
-            Console.WriteLine($"\nSuccess! Corrections detected.");
-            Console.WriteLine($"Original file: {filePath}");
-            Console.WriteLine($"Corrected file saved to: {outputPath}");
+            Console.WriteLine($"Changes detected! Corrected file saved to: {outputFileName}");
         }
     }
     catch (Exception ex)
