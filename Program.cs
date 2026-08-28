@@ -13,11 +13,14 @@ using System.Threading.Tasks;
 if (args.Length < 1)
 {
     Console.WriteLine("Usage:");
+    Console.WriteLine("  View statistics (file):   GeminiChecker <input_file_path> --stats (or --stat, -st, -a, --analyze)");
     Console.WriteLine("  Split questions:          GeminiChecker <input_file_path> [--split (or -spl)] [--count <int>]");
     Console.WriteLine("  Merge & Analyze folder:   GeminiChecker <input_directory_path>");
     Console.WriteLine("  Verify file with Gemini:  GeminiChecker <input_file_path> --check (or -c) --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
     Console.WriteLine("  Generate questions:       GeminiChecker --generate (or -gen) --topics <topics_json_path> --group <index> --count <int> --level <junior/middle> --start-id <int> --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
     Console.WriteLine("\nOptions:");
+    Console.WriteLine("  -st, --stat, --stats      Show detailed question statistics (totals, per group, per language).");
+    Console.WriteLine("  -a, --analyze             Alias for statistics and JSON validation.");
     Console.WriteLine("  -spl, --split             Explicitly trigger split mode on the specified file.");
     Console.WriteLine("  -c, --check               Trigger Gemini verification/correction mode on the specified file.");
     Console.WriteLine("  -gen, --generate          Trigger Gemini question generation mode.");
@@ -43,6 +46,12 @@ bool isCheckMode = args.Contains("--check", StringComparer.OrdinalIgnoreCase) ||
 
 bool isSplitMode = args.Contains("--split", StringComparer.OrdinalIgnoreCase) ||
                    args.Contains("-spl", StringComparer.OrdinalIgnoreCase);
+
+bool isAnalyzeMode = args.Contains("--analyze", StringComparer.OrdinalIgnoreCase) ||
+                     args.Contains("-a", StringComparer.OrdinalIgnoreCase) ||
+                     args.Contains("--stats", StringComparer.OrdinalIgnoreCase) ||
+                     args.Contains("--stat", StringComparer.OrdinalIgnoreCase) ||
+                     args.Contains("-st", StringComparer.OrdinalIgnoreCase);
 
 string topicsPath = string.Empty;
 int groupIndex = 0;
@@ -140,6 +149,14 @@ for (int i = 0; i < args.Length; i++)
     {
         continue;
     }
+    if (arg.Equals("--analyze", StringComparison.OrdinalIgnoreCase) ||
+        arg.Equals("-a", StringComparison.OrdinalIgnoreCase) ||
+        arg.Equals("--stats", StringComparison.OrdinalIgnoreCase) ||
+        arg.Equals("--stat", StringComparison.OrdinalIgnoreCase) ||
+        arg.Equals("-st", StringComparison.OrdinalIgnoreCase))
+    {
+        continue;
+    }
     if (arg.Equals("--topics", StringComparison.OrdinalIgnoreCase) || arg.Equals("-t", StringComparison.OrdinalIgnoreCase))
     {
         i++; // Skip its value
@@ -195,6 +212,15 @@ if (string.IsNullOrEmpty(inputPath) && !isGenerateMode)
 if (isGenerateMode)
 {
     await GenerateQuestionsAsync(topicsPath, groupIndex, count, level, startId, apiKey, modelName, promptFilePath);
+}
+else if (isAnalyzeMode)
+{
+    if (!File.Exists(inputPath))
+    {
+        Console.WriteLine($"Error: File '{inputPath}' not found for analysis.");
+        Environment.Exit(1);
+    }
+    await AnalyzeJsonFileAsync(inputPath);
 }
 else if (isCheckMode)
 {
@@ -699,25 +725,7 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
         Console.WriteLine($"\nSuccessfully merged all files into: {outputFilePath}");
 
         // Display Statistics at the end
-        Console.WriteLine("\n================ STATISTICS ================");
-
-        int totalUniqueQuestions = orderedQuestions.Select(q => q.QuestionId).Distinct().Count();
-        Console.WriteLine($"усього {totalUniqueQuestions} питань");
-
-        var groups = orderedQuestions.GroupBy(q => q.GroupIndex).OrderBy(g => g.Key);
-        foreach (var group in groups)
-        {
-            int groupUniqueQuestions = group.Select(q => q.QuestionId).Distinct().Count();
-            Console.WriteLine($"група {group.Key}: {groupUniqueQuestions} питань усього");
-
-            var langs = group.Select(q => q.Lang.ToLower().Trim()).Distinct().OrderBy(l => l);
-            foreach (var lang in langs)
-            {
-                int langCount = group.Count(q => q.Lang.Equals(lang, StringComparison.OrdinalIgnoreCase));
-                Console.WriteLine($"група {group.Key}: {langCount} питань {lang}");
-            }
-        }
-        Console.WriteLine("============================================");
+        PrintStatistics(orderedQuestions);
     }
     catch (Exception ex)
     {
@@ -812,6 +820,83 @@ async Task SplitQuestionsAsync(string filePath, int chunkSize)
     {
         Console.WriteLine($"An unexpected error occurred: {ex.Message}");
     }
+}
+
+// ==========================================
+// 5. JSON ANALYSIS LOGIC
+// ==========================================
+async Task AnalyzeJsonFileAsync(string filePath)
+{
+    try
+    {
+        Console.WriteLine($"Reading file for analysis: {filePath}...");
+        string jsonContent = await File.ReadAllTextAsync(filePath);
+
+        // Validate JSON structure
+        using var doc = JsonDocument.Parse(jsonContent);
+
+        var options = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
+        var questions = JsonSerializer.Deserialize<QuestionItem[]>(jsonContent, options);
+        if (questions == null || questions.Length == 0)
+        {
+            Console.WriteLine("The file does not contain any questions or could not be deserialized.");
+            return;
+        }
+
+        Console.WriteLine($"JSON syntax is valid. Total records: {questions.Length}");
+        PrintStatistics(questions);
+    }
+    catch (JsonException jsonEx)
+    {
+        Console.WriteLine($"[ERROR] JSON format is invalid: {jsonEx.Message}");
+        if (jsonEx.LineNumber.HasValue)
+        {
+            Console.WriteLine($"Line: {jsonEx.LineNumber.Value}, Position: {jsonEx.BytePositionInLine}");
+        }
+        Environment.Exit(1);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"An unexpected error occurred: {ex.Message}");
+        Environment.Exit(1);
+    }
+}
+
+// Helper method to display statistics
+// Helper method to display statistics
+void PrintStatistics(IEnumerable<QuestionItem> questions)
+{
+    Console.WriteLine("\n================ STATISTICS ================");
+
+    int totalUniqueQuestions = questions.Select(q => q.QuestionId).Distinct().Count();
+    Console.WriteLine($"Total unique questions: {totalUniqueQuestions}");
+
+    var groups = questions.GroupBy(q => q.GroupIndex).OrderBy(g => g.Key);
+    foreach (var group in groups)
+    {
+        int groupUniqueQuestions = group.Select(q => q.QuestionId).Distinct().Count();
+        Console.WriteLine($"Group {group.Key}: {groupUniqueQuestions} total questions");
+
+        var langs = group.Select(q => q.Lang.ToLower().Trim()).Distinct().OrderBy(l => l);
+        foreach (var lang in langs)
+        {
+            int langCount = group.Count(q => q.Lang.Equals(lang, StringComparison.OrdinalIgnoreCase));
+            Console.WriteLine($"Group {group.Key}: {langCount} questions ({lang})");
+        }
+
+        // Display entry count and languages for each question_id within the group
+        var idGroups = group.GroupBy(q => q.QuestionId).OrderBy(g => g.Key);
+        foreach (var idGroup in idGroups)
+        {
+            var langsForId = string.Join(", ", idGroup.Select(q => q.Lang.ToLower().Trim()));
+            Console.WriteLine($"  Group {group.Key}, Question ID {idGroup.Key}: {idGroup.Count()} entries ({langsForId})");
+        }
+    }
+    Console.WriteLine("============================================");
 }
 
 // Data models for JSON mapping
