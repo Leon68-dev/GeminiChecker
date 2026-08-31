@@ -489,11 +489,10 @@ async Task GenerateQuestionsAsync(string tPath, int gIdx, int qCount, string qLe
         var generateTask = model.GenerateContent(fullPrompt, generationConfig: generationConfig);
 
         Console.Write("Elapsed: 00:00");
-
-        // Periodically update the timer every 5 seconds on the same console line
+        
         while (!generateTask.IsCompleted)
         {
-            await Task.WhenAny(generateTask, Task.Delay(5000));
+            await Task.WhenAny(generateTask, Task.Delay(1000));
             if (!generateTask.IsCompleted)
             {
                 Console.Write($"\rElapsed: {stopwatch.Elapsed:mm\\:ss}   ");
@@ -658,8 +657,26 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
 
         string fullPrompt = $"{systemPrompt}\n\nHere is the JSON to check:\n{originalJson}";
 
+        // Start request and track elapsed execution time
         Console.WriteLine("Sending data to Gemini for review. Please wait...");
-        var response = await model.GenerateContent(fullPrompt, generationConfig: generationConfig);
+        var stopwatch = Stopwatch.StartNew();
+        var verifyTask = model.GenerateContent(fullPrompt, generationConfig: generationConfig);
+
+        Console.Write("Elapsed: 00:00");
+
+        while (!verifyTask.IsCompleted)
+        {
+            await Task.WhenAny(verifyTask, Task.Delay(1000));
+            if (!verifyTask.IsCompleted)
+            {
+                Console.Write($"\rElapsed: {stopwatch.Elapsed:mm\\:ss}   ");
+            }
+        }
+
+        stopwatch.Stop();
+        Console.WriteLine($"\rCompleted in: {stopwatch.Elapsed:mm\\:ss}!      ");
+
+        var response = await verifyTask;
 
         if (response == null || string.IsNullOrWhiteSpace(response.Text))
         {
