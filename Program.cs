@@ -2,6 +2,7 @@
 using Mscc.GenerativeAI.Types;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Encodings.Web;
@@ -18,12 +19,15 @@ if (args.Length < 1)
     Console.WriteLine("  Merge & Analyze folder:   GeminiChecker <input_directory_path>");
     Console.WriteLine("  Verify file with Gemini:  GeminiChecker <input_file_path> --check (or -c) --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
     Console.WriteLine("  Generate questions:       GeminiChecker --generate (or -gen) --topics <topics_json_path> --group <index> --count <int> --level <junior/middle> --start-id <int> --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
+    Console.WriteLine("  Export prompt to file:    GeminiChecker --save-prompt (or -sp, --dump-prompt, -dp) --topics <topics_json_path> --group <index> --count <int> --level <junior/middle> --start-id <int> [--prompt <prompt_file_path>]");
     Console.WriteLine("\nOptions:");
     Console.WriteLine("  -st, --stat, --stats      Show detailed question statistics (totals, per group, per language).");
     Console.WriteLine("  -a, --analyze             Alias for statistics and JSON validation.");
     Console.WriteLine("  -spl, --split             Explicitly trigger split mode on the specified file.");
     Console.WriteLine("  -c, --check               Trigger Gemini verification/correction mode on the specified file.");
     Console.WriteLine("  -gen, --generate          Trigger Gemini question generation mode.");
+    Console.WriteLine("  -sp, --save-prompt        Assemble and save the complete generation prompt to a text file without calling API.");
+    Console.WriteLine("  -dp, --dump-prompt        Alias for --save-prompt.");
     Console.WriteLine("  -t, --topics <path>       Path to topics.json file for subject matter matching.");
     Console.WriteLine("  -g, -grp, --group <idx>   Target group index (topic) for generation (default: 0).");
     Console.WriteLine("  -cnt, --count <int>       Number of unique questions per chunk (for split mode) or to generate (default: 8).");
@@ -40,6 +44,11 @@ if (args.Length < 1)
 // ---------------------------------------------------------
 bool isGenerateMode = args.Contains("--generate", StringComparer.OrdinalIgnoreCase) ||
                       args.Contains("-gen", StringComparer.OrdinalIgnoreCase);
+
+bool isSavePromptMode = args.Contains("--save-prompt", StringComparer.OrdinalIgnoreCase) ||
+                        args.Contains("-sp", StringComparer.OrdinalIgnoreCase) ||
+                        args.Contains("--dump-prompt", StringComparer.OrdinalIgnoreCase) ||
+                        args.Contains("-dp", StringComparer.OrdinalIgnoreCase);
 
 bool isCheckMode = args.Contains("--check", StringComparer.OrdinalIgnoreCase) ||
                    args.Contains("-c", StringComparer.OrdinalIgnoreCase);
@@ -121,7 +130,7 @@ if (keyIndex != -1 && keyIndex + 1 < args.Length)
 }
 else
 {
-    // Try to fallback to environment variable for convenience
+    // Fallback to environment variable for convenience
     apiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? string.Empty;
 }
 
@@ -138,6 +147,11 @@ for (int i = 0; i < args.Length; i++)
 {
     string arg = args[i];
     if (arg.Equals("--generate", StringComparison.OrdinalIgnoreCase) || arg.Equals("-gen", StringComparison.OrdinalIgnoreCase))
+    {
+        continue;
+    }
+    if (arg.Equals("--save-prompt", StringComparison.OrdinalIgnoreCase) || arg.Equals("-sp", StringComparison.OrdinalIgnoreCase) ||
+        arg.Equals("--dump-prompt", StringComparison.OrdinalIgnoreCase) || arg.Equals("-dp", StringComparison.OrdinalIgnoreCase))
     {
         continue;
     }
@@ -202,14 +216,18 @@ for (int i = 0; i < args.Length; i++)
     break;
 }
 
-if (string.IsNullOrEmpty(inputPath) && !isGenerateMode)
+if (string.IsNullOrEmpty(inputPath) && !isGenerateMode && !isSavePromptMode)
 {
     Console.WriteLine("Error: Missing input file or directory path.");
     Environment.Exit(1);
 }
 
 // Router to appropriate functionality based on inputs
-if (isGenerateMode)
+if (isSavePromptMode)
+{
+    await SavePromptToFileAsync(topicsPath, groupIndex, count, level, startId, promptFilePath);
+}
+else if (isGenerateMode)
 {
     await GenerateQuestionsAsync(topicsPath, groupIndex, count, level, startId, apiKey, modelName, promptFilePath);
 }
@@ -242,7 +260,7 @@ else if (isSplitMode)
 }
 else
 {
-    // Backwards-compatible auto-detect router when no explicit split/check/generate flags are passed
+    // Backwards-compatible auto-detect router when no explicit flags are passed
     if (Directory.Exists(inputPath))
     {
         await MergeAndAnalyzeAsync(inputPath);
@@ -258,7 +276,174 @@ else
 }
 
 // ==========================================
-// 1. GEMINI GENERATION LOGIC
+// 1. ASSEMBLE PROMPT HELPER
+// ==========================================
+async Task<(string FullPrompt, string OutputDirectory)> BuildPromptAsync(string tPath, int gIdx, int qCount, string qLevel, int sId, string promptPath)
+{
+    if (string.IsNullOrWhiteSpace(tPath) || !File.Exists(tPath))
+    {
+        Console.WriteLine($"Error: Topics specification file '{tPath}' not found or not specified.");
+        Environment.Exit(1);
+    }
+
+    string directory = Path.GetDirectoryName(tPath);
+    if (string.IsNullOrEmpty(directory)) directory = Directory.GetCurrentDirectory();
+
+    Console.WriteLine("Reading topics.json...");
+    string topicsContent = await File.ReadAllTextAsync(tPath);
+
+    var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+    var topics = JsonSerializer.Deserialize<TopicItem[]>(topicsContent, options);
+
+    if (topics == null || topics.Length == 0)
+    {
+        Console.WriteLine("Error: Failed to deserialize topics or file is empty.");
+        Environment.Exit(1);
+    }
+
+    // Retrieve localized topic names for the requested group
+    var groupTopics = topics.Where(t => t.GroupIndex == gIdx).ToList();
+    if (groupTopics.Count == 0)
+    {
+        Console.WriteLine($"Error: No topic names found in topics.json for group index {gIdx}.");
+        Environment.Exit(1);
+    }
+
+    string topicGuidelines = string.Join("\n", groupTopics.Select(t => $"- Language '{t.Lang}': Topic name is \"{t.Name}\""));
+
+    // ---------------------------------------------------------
+    // DYNAMIC DUPLICATION PROTECTION (BLACKLISTING)
+    // ---------------------------------------------------------
+    Console.WriteLine("Scanning directory for existing questions to compile blacklist...");
+    var regex = new Regex(@"^.+_\d+_\d+(_chn)?\.json$", RegexOptions.IgnoreCase);
+    var jsonFiles = Directory.GetFiles(directory, "*.json")
+        .Where(f => regex.IsMatch(Path.GetFileName(f)))
+        .ToList();
+
+    var existingQuestions = new List<string>();
+    foreach (var file in jsonFiles)
+    {
+        try
+        {
+            string content = await File.ReadAllTextAsync(file);
+            var questions = JsonSerializer.Deserialize<QuestionItem[]>(content, options);
+            if (questions != null)
+            {
+                // Extract English questions to use as semantic exclude filters for Gemini
+                var filtered = questions.Where(q => q.GroupIndex == gIdx && string.Equals(q.Lang, "en", StringComparison.OrdinalIgnoreCase));
+                foreach (var q in filtered)
+                {
+                    if (!string.IsNullOrWhiteSpace(q.Question))
+                    {
+                        existingQuestions.Add(q.Question.Trim());
+                    }
+                }
+            }
+        }
+        catch { /* Ignore corrupted or unrelated json files */ }
+    }
+
+    string blacklistPrompt = string.Empty;
+    if (existingQuestions.Count > 0)
+    {
+        Console.WriteLine($"Found {existingQuestions.Count} already existing unique questions. Registering them as a blacklist...");
+        blacklistPrompt = "\nCRITICAL: You MUST NOT generate questions that are identical or semantically similar to any of the following already existing questions in our database:\n" +
+                          string.Join("\n", existingQuestions.Select((q, index) => $"{index + 1}. {q}"));
+    }
+    else
+    {
+        Console.WriteLine("No pre-existing questions found. Generating from a clean slate.");
+    }
+
+    // ---------------------------------------------------------
+    // PROMPT FORMULATION
+    // ---------------------------------------------------------
+    string systemPrompt;
+    if (!string.IsNullOrWhiteSpace(promptPath))
+    {
+        if (!File.Exists(promptPath))
+        {
+            Console.WriteLine($"Error: Prompt rules file '{promptPath}' not found.");
+            Environment.Exit(1);
+        }
+        Console.WriteLine($"Loading generation guidelines from: {promptPath}...");
+        systemPrompt = await File.ReadAllTextAsync(promptPath);
+    }
+    else
+    {
+        Console.WriteLine("No custom generation guidelines specified. Using default educator guidelines...");
+        systemPrompt = "You are an expert educator, scholar, and quiz creator.";
+    }
+
+    int endId = sId + qCount - 1;
+
+    string generationInstruction =
+        $"TASK SPECIFICATION:\n" +
+        $"- Target Group Index: {gIdx}\n" +
+        $"- Question ID Range : {sId} to {endId} (Total: {qCount} unique questions)\n" +
+        $"- Difficulty Level  : '{qLevel}'\n\n" +
+        $"CORE SOURCING AND STRUCTURAL RULES:\n" +
+        $"- STRICT QUESTION UNIQUENESS: Every question MUST be 100% distinct in concept, scenario, code snippet, and problem statement. Absolutely NO duplicate questions, minor rephrasings, or semantic repetitions across different question_ids, especially within the same group index ({gIdx}) and difficulty level ('{qLevel}'). Each question_id must test a completely different aspect or subtopic.\n" +
+        $"- Source questions and conceptual depth from reputable US and European technical websites, literature, and official standards.\n" +
+        $"- Correct and incorrect answer choices must be of comparable length and complexity so that the correct answer is not obvious.\n" +
+        $"- Explanations must be approximately 5 sentences long, clearly detailing why the correct answer is right and why distractors are wrong.\n" +
+        $"- ABSOLUTE PROHIBITION ON BACKTICKS: NEVER use the backtick symbol (`) anywhere in the text. For code elements, function names, types, and keywords (like 'std::vector', 'push_back', 'const', 'int'), ALWAYS use single quotes ('...') or double quotes (\"...\").\n" +
+        $"- The correct answer keys MUST follow a simple rotating cycle across consecutive question_ids: a, b, c, d, a, b, c, d...\n\n" +
+        $"For EACH unique question_id, you must generate exactly 5 translations (one for each language: en, uk, de, es, fr).\n" +
+        $"The questions must be perfectly aligned with the topics defined for this group in each language:\n" +
+        $"{topicGuidelines}\n\n" +
+        $"Requirements for each question object:\n" +
+        $"1. 'question_id' must be the same integer across all 5 language translations.\n" +
+        $"2. 'lang' must be exactly 'en', 'uk', 'de', 'es', or 'fr'.\n" +
+        $"3. 'level' must be exactly '{qLevel}'.\n" +
+        $"4. 'group_index' must be exactly {gIdx}.\n" +
+        $"5. 'question' must be unique, clear, factual, and accurate. Use domain-specific terminology, formulas, code snippets, or relevant examples without repeating concepts tested in other question_ids.\n" +
+        $"6. 'answer_a', 'answer_b', 'answer_c', 'answer_d' must contain the choices.\n" +
+        $"7. 'answer_win' must be exactly 'a', 'b', 'c', or 'd'. It MUST be identical across all 5 translations for that question_id and follow the cyclical sequence (a, b, c, d, a, b, c, d...).\n" +
+        $"8. 'explanation' must be approximately 5 sentences long explaining the reasoning.\n\n" +
+        blacklistPrompt;
+
+    string fullPrompt = $"{systemPrompt}\n\n{generationInstruction}";
+    return (fullPrompt, directory);
+}
+
+// ==========================================
+// 2. SAVE PROMPT TO FILE LOGIC
+// ==========================================
+async Task SavePromptToFileAsync(string tPath, int gIdx, int qCount, string qLevel, int sId, string promptPath)
+{
+    int endId = sId + qCount - 1;
+    Console.WriteLine("============================================");
+    Console.WriteLine($"Exporting Prompt Target:");
+    Console.WriteLine($"  Group Index : {gIdx}");
+    Console.WriteLine($"  ID Range    : {sId} - {endId} (Total: {qCount} unique questions)");
+    Console.WriteLine($"  Difficulty  : {qLevel}");
+    Console.WriteLine("============================================");
+
+    try
+    {
+        var (fullPrompt, directory) = await BuildPromptAsync(tPath, gIdx, qCount, qLevel, sId, promptPath);
+
+        int width = Math.Max(4, sId.ToString().Length);
+        string paddedStartIndex = sId.ToString("D" + width);
+
+        string outputFileName = $"prompt_{gIdx}_{paddedStartIndex}.txt";
+        string outputPath = Path.Combine(directory, outputFileName);
+
+        await File.WriteAllTextAsync(outputPath, fullPrompt);
+
+        Console.WriteLine($"\n[SUCCESS] Prompt assembled and exported successfully!");
+        Console.WriteLine($"Prompt file saved to: {outputPath}");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"An error occurred while exporting prompt: {ex.Message}");
+        Environment.Exit(1);
+    }
+}
+
+// ==========================================
+// 3. GEMINI GENERATION LOGIC
 // ==========================================
 async Task GenerateQuestionsAsync(string tPath, int gIdx, int qCount, string qLevel, int sId, string apiToken, string selectedModel, string promptPath)
 {
@@ -268,123 +453,25 @@ async Task GenerateQuestionsAsync(string tPath, int gIdx, int qCount, string qLe
         Environment.Exit(1);
     }
 
-    if (string.IsNullOrWhiteSpace(tPath) || !File.Exists(tPath))
-    {
-        Console.WriteLine($"Error: Topics specification file '{tPath}' not found or not specified.");
-        Environment.Exit(1);
-    }
+    int endId = sId + qCount - 1;
+    Console.WriteLine("============================================");
+    Console.WriteLine($"Generation Target:");
+    Console.WriteLine($"  Group Index : {gIdx}");
+    Console.WriteLine($"  ID Range    : {sId} - {endId} (Total: {qCount} unique questions)");
+    Console.WriteLine($"  Difficulty  : {qLevel}");
+    Console.WriteLine("============================================");
+
+    string directory = Directory.GetCurrentDirectory();
+    int width = Math.Max(4, sId.ToString().Length);
+    string paddedStartIndex = sId.ToString("D" + width);
+    string baseFileName = $"questions_{gIdx}_{paddedStartIndex}";
+    string rawTextReceived = string.Empty;
 
     try
     {
-        string directory = Path.GetDirectoryName(tPath);
-        if (string.IsNullOrEmpty(directory)) directory = Directory.GetCurrentDirectory();
-
-        Console.WriteLine("Reading topics.json...");
-        string topicsContent = await File.ReadAllTextAsync(tPath);
-
-        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-        var topics = JsonSerializer.Deserialize<TopicItem[]>(topicsContent, options);
-
-        if (topics == null || topics.Length == 0)
-        {
-            Console.WriteLine("Error: Failed to deserialize topics or file is empty.");
-            Environment.Exit(1);
-        }
-
-        // Retrieve localized topic names for the requested group
-        var groupTopics = topics.Where(t => t.GroupIndex == gIdx).ToList();
-        if (groupTopics.Count == 0)
-        {
-            Console.WriteLine($"Error: No topic names found in topics.json for group index {gIdx}.");
-            Environment.Exit(1);
-        }
-
-        string topicGuidelines = string.Join("\n", groupTopics.Select(t => $"- Language '{t.Lang}': Topic name is \"{t.Name}\""));
-
-        // ---------------------------------------------------------
-        // DYNAMIC DUPLICATION PROTECTION (BLACKLISTING)
-        // ---------------------------------------------------------
-        Console.WriteLine("Scanning directory for existing questions to compile blacklist...");
-        var regex = new Regex(@"^.+_\d+_\d+(_chn)?\.json$", RegexOptions.IgnoreCase);
-        var jsonFiles = Directory.GetFiles(directory, "*.json")
-            .Where(f => regex.IsMatch(Path.GetFileName(f)))
-            .ToList();
-
-        var existingQuestions = new List<string>();
-        foreach (var file in jsonFiles)
-        {
-            try
-            {
-                string content = await File.ReadAllTextAsync(file);
-                var questions = JsonSerializer.Deserialize<QuestionItem[]>(content, options);
-                if (questions != null)
-                {
-                    // Extract English questions to use as semantic exclude filters for Gemini
-                    var filtered = questions.Where(q => q.GroupIndex == gIdx && string.Equals(q.Lang, "en", StringComparison.OrdinalIgnoreCase));
-                    foreach (var q in filtered)
-                    {
-                        if (!string.IsNullOrWhiteSpace(q.Question))
-                        {
-                            existingQuestions.Add(q.Question.Trim());
-                        }
-                    }
-                }
-            }
-            catch { /* Ignore corrupted or unrelated json files */ }
-        }
-
-        string blacklistPrompt = string.Empty;
-        if (existingQuestions.Count > 0)
-        {
-            Console.WriteLine($"Found {existingQuestions.Count} already existing unique questions. Registering them as a blacklist...");
-            blacklistPrompt = "\nCRITICAL: You MUST NOT generate questions that are identical or semantically similar to any of the following already existing questions in our database:\n" +
-                              string.Join("\n", existingQuestions.Select((q, index) => $"{index + 1}. {q}"));
-        }
-        else
-        {
-            Console.WriteLine("No pre-existing questions found. Generating from a clean slate.");
-        }
-
-        // ---------------------------------------------------------
-        // PROMPT FORMULATION
-        // ---------------------------------------------------------
-        string systemPrompt;
-        if (!string.IsNullOrWhiteSpace(promptPath))
-        {
-            if (!File.Exists(promptPath))
-            {
-                Console.WriteLine($"Error: Prompt rules file '{promptPath}' not found.");
-                Environment.Exit(1);
-            }
-            Console.WriteLine($"Loading generation guidelines from: {promptPath}...");
-            systemPrompt = await File.ReadAllTextAsync(promptPath);
-        }
-        else
-        {
-            Console.WriteLine("No custom generation guidelines specified. Using default educator guidelines...");
-            systemPrompt = "You are an expert educator, scholar, and quiz creator.";
-        }
-
-        string generationInstruction =
-            $"Your task is to generate exactly {qCount} unique multiple-choice quiz questions for group index {gIdx}.\n" +
-            $"Difficulty level: '{qLevel}'.\n" +
-            $"Start indexing with question_id: {sId}.\n\n" +
-            $"For EACH unique question_id, you must generate exactly 5 translations (one for each language: en, uk, de, es, fr).\n" +
-            $"The questions must be perfectly aligned with the topics defined for this group in each language:\n" +
-            $"{topicGuidelines}\n\n" +
-            $"Requirements for each question object:\n" +
-            $"1. 'question_id' must be the same integer across all 5 language translations.\n" +
-            $"2. 'lang' must be exactly 'en', 'uk', 'de', 'es', or 'fr'.\n" +
-            $"3. 'level' must be exactly '{qLevel}'.\n" +
-            $"4. 'group_index' must be exactly {gIdx}.\n" +
-            $"5. 'question' should be clear, factual, and accurate. Use domain-specific terminology, historical dates, formulas, code snippets, or relevant examples where necessary.\n" +
-            $"6. 'answer_a', 'answer_b', 'answer_c', 'answer_d' must contain the choices.\n" +
-            $"7. 'answer_win' must be exactly 'a', 'b', 'c', or 'd'. It must be identical across all 5 translations for that question_id.\n" +
-            $"8. 'explanation' must explain why the winning answer is correct.\n\n" +
-            $"Output ONLY a valid JSON array of QuestionItem objects. Do not write any explanations, greetings, introduction, or markdown block wrapping (like ```json). Just the raw JSON content." +
-            blacklistPrompt;
-
-        string fullPrompt = $"{systemPrompt}\n\n{generationInstruction}";
+        var promptResult = await BuildPromptAsync(tPath, gIdx, qCount, qLevel, sId, promptPath);
+        string fullPrompt = promptResult.FullPrompt;
+        directory = promptResult.OutputDirectory;
 
         Console.WriteLine($"Connecting to Gemini API using model: {selectedModel}...");
         var googleAI = new GoogleAI(apiKey: apiToken);
@@ -396,16 +483,39 @@ async Task GenerateQuestionsAsync(string tPath, int gIdx, int qCount, string qLe
             MaxOutputTokens = 65536
         };
 
+        // Start request and track elapsed execution time
         Console.WriteLine("Generating questions via Gemini. Please wait...");
-        var response = await model.GenerateContent(fullPrompt, generationConfig: generationConfig);
+        var stopwatch = Stopwatch.StartNew();
+        var generateTask = model.GenerateContent(fullPrompt, generationConfig: generationConfig);
+
+        Console.Write("Elapsed: 00:00");
+
+        // Periodically update the timer every 5 seconds on the same console line
+        while (!generateTask.IsCompleted)
+        {
+            await Task.WhenAny(generateTask, Task.Delay(5000));
+            if (!generateTask.IsCompleted)
+            {
+                Console.Write($"\rElapsed: {stopwatch.Elapsed:mm\\:ss}   ");
+            }
+        }
+
+        stopwatch.Stop();
+        Console.WriteLine($"\rCompleted in: {stopwatch.Elapsed:mm\\:ss}!      ");
+
+        var response = await generateTask;
 
         if (response == null || string.IsNullOrWhiteSpace(response.Text))
         {
-            Console.WriteLine("Error: Gemini returned an empty response.");
+            string emptyErrorPath = Path.Combine(directory, $"{baseFileName}_error.txt");
+            await File.WriteAllTextAsync(emptyErrorPath, "Gemini returned an empty response or null.");
+            Console.WriteLine($"\n[ERROR] Gemini returned an empty response.");
+            Console.WriteLine($"Error log saved to: {emptyErrorPath}");
             Environment.Exit(1);
         }
 
-        string processedJson = response.Text.Trim();
+        rawTextReceived = response.Text;
+        string processedJson = rawTextReceived.Trim();
 
         // Clean up markdown block wrapping
         if (processedJson.StartsWith("```"))
@@ -424,17 +534,18 @@ async Task GenerateQuestionsAsync(string tPath, int gIdx, int qCount, string qLe
         // Verify JSON before saving
         try
         {
+            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             var generatedQuestions = JsonSerializer.Deserialize<QuestionItem[]>(processedJson, options);
             if (generatedQuestions == null || generatedQuestions.Length == 0)
             {
-                Console.WriteLine("Error: Deserialized object array is empty.");
+                string emptyArrayPath = Path.Combine(directory, $"{baseFileName}_raw_error.txt");
+                await File.WriteAllTextAsync(emptyArrayPath, rawTextReceived);
+                Console.WriteLine($"\n[ERROR] Deserialized object array is empty.");
+                Console.WriteLine($"Raw response from API saved to: {emptyArrayPath}");
                 Environment.Exit(1);
             }
 
-            int width = Math.Max(4, sId.ToString().Length);
-            string paddedStartIndex = sId.ToString("D" + width);
-
-            string outputFileName = $"questions_{gIdx}_{paddedStartIndex}.json";
+            string outputFileName = $"{baseFileName}.json";
             string outputPath = Path.Combine(directory, outputFileName);
 
             var writeOptions = new JsonSerializerOptions
@@ -451,21 +562,36 @@ async Task GenerateQuestionsAsync(string tPath, int gIdx, int qCount, string qLe
         }
         catch (JsonException ex)
         {
-            Console.WriteLine("Error: Response from Gemini is not a valid JSON array. Details: " + ex.Message);
-            Console.WriteLine("Raw response was:");
-            Console.WriteLine(processedJson);
+            // Save the raw text received from Gemini to disk so work is not lost
+            string errorOutputPath = Path.Combine(directory, $"{baseFileName}_raw_error.txt");
+            await File.WriteAllTextAsync(errorOutputPath, rawTextReceived);
+
+            Console.WriteLine("\n[ERROR] Response from Gemini is not a valid JSON array.");
+            Console.WriteLine($"Details: {ex.Message}");
+            Console.WriteLine($"Raw response from API saved to: {errorOutputPath}");
             Environment.Exit(1);
         }
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"An error occurred during generation: {ex.Message}");
+        if (!string.IsNullOrWhiteSpace(rawTextReceived))
+        {
+            string errorPath = Path.Combine(directory, $"{baseFileName}_raw_error.txt");
+            try
+            {
+                await File.WriteAllTextAsync(errorPath, rawTextReceived);
+                Console.WriteLine($"Raw API response was saved to: {errorPath}");
+            }
+            catch { /* Ignore secondary disk write exceptions */ }
+        }
+
+        Console.WriteLine($"\n[ERROR] An error occurred during generation: {ex.Message}");
         Environment.Exit(1);
     }
 }
 
 // ==========================================
-// 2. GEMINI VERIFICATION LOGIC
+// 4. GEMINI VERIFICATION LOGIC
 // ==========================================
 async Task VerifyWithGeminiAsync(string filePath, string apiToken, string selectedModel, string promptPath)
 {
@@ -538,7 +664,7 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
         if (response == null || string.IsNullOrWhiteSpace(response.Text))
         {
             Console.WriteLine("Error: Gemini returned an empty response or the request was blocked.");
-            Environment.Exit(1); // Exit the program on empty response error
+            Environment.Exit(1);
         }
 
         string processedJson = response.Text.Trim();
@@ -561,7 +687,7 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
             if (isAlreadyCorrect)
             {
                 Console.WriteLine("No changes detected.");
-                return; // Gracefully exit without generating a _chn file
+                return;
             }
 
             Console.WriteLine("\n[ERROR] Gemini did not return a valid JSON array.");
@@ -587,7 +713,6 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
                 Console.WriteLine($"Line: {ex.LineNumber.Value}, Position: {ex.BytePositionInLine}");
             }
 
-            // Print raw response ONLY if it is not a giant questions dump to avoid spamming the console
             bool isQuestionsDump = response.Text.Contains("question_id") || response.Text.Contains("explanation");
             if (!isQuestionsDump)
             {
@@ -600,7 +725,7 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
             }
 
             Console.WriteLine("Please fix the prompt rules or verify the source data size.");
-            Environment.Exit(1); // Exit the program on JSON validation error
+            Environment.Exit(1);
         }
 
         // Check if any changes were made
@@ -625,12 +750,12 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
     catch (Exception ex)
     {
         Console.WriteLine($"An error occurred: {ex.Message}");
-        Environment.Exit(1); // Exit the program on any API or connection exception
+        Environment.Exit(1);
     }
 }
 
 // ==========================================
-// 3. MERGE AND ANALYZE LOGIC
+// 5. MERGE AND ANALYZE LOGIC
 // ==========================================
 async Task MergeAndAnalyzeAsync(string directoryPath)
 {
@@ -638,8 +763,6 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
     {
         Console.WriteLine($"Analyzing directory: {directoryPath}...");
 
-        // Regex to match only chunk files like questions_0_1.json or questions_0_1_chn.json
-        // This safely ignores main questions.json and previous timestamped merged files
         var regex = new Regex(@"^.+_\d+_\d+(_chn)?\.json$", RegexOptions.IgnoreCase);
 
         var jsonFiles = Directory.GetFiles(directoryPath, "*.json")
@@ -652,7 +775,6 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
             return;
         }
 
-        // Apply '_chn' override logic: ignore original if '_chn' version exists
         var filesToProcess = new List<string>();
         foreach (var file in jsonFiles)
         {
@@ -664,7 +786,6 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
             else
             {
                 string chnFile = Path.Combine(directoryPath, fileName + "_chn.json");
-                // If there is no corresponding _chn file in the list, process the original
                 if (!jsonFiles.Any(f => string.Equals(f, chnFile, StringComparison.OrdinalIgnoreCase)))
                 {
                     filesToProcess.Add(file);
@@ -684,7 +805,6 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
             PropertyNameCaseInsensitive = true
         };
 
-        // Read and deserialize each selected file
         foreach (var file in filesToProcess)
         {
             string content = await File.ReadAllTextAsync(file);
@@ -701,14 +821,12 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
             return;
         }
 
-        // De-duplicate by unique key to prevent overlaps, then sort strictly by question_id
         var orderedQuestions = allQuestions
             .GroupBy(q => new { q.GroupIndex, q.QuestionId, Lang = q.Lang.ToLower().Trim() })
             .Select(g => g.First())
             .OrderBy(q => q.QuestionId)
             .ToList();
 
-        // Create output filename with timestamp
         string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
         string outputFileName = $"questions_{timestamp}.json";
         string outputFilePath = Path.Combine(directoryPath, outputFileName);
@@ -723,8 +841,6 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
         await File.WriteAllTextAsync(outputFilePath, outputJson);
 
         Console.WriteLine($"\nSuccessfully merged all files into: {outputFilePath}");
-
-        // Display Statistics at the end
         PrintStatistics(orderedQuestions);
     }
     catch (Exception ex)
@@ -734,7 +850,7 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
 }
 
 // ==========================================
-// 4. SPLIT LOGIC
+// 6. SPLIT LOGIC
 // ==========================================
 async Task SplitQuestionsAsync(string filePath, int chunkSize)
 {
@@ -758,15 +874,11 @@ async Task SplitQuestionsAsync(string filePath, int chunkSize)
 
         Console.WriteLine($"Total records read: {questions.Length}");
 
-        // Find the maximum question ID in the entire file
         int maxId = questions.Max(q => q.QuestionId);
-
-        // Calculate the padding width based on the number of digits in the maximum ID
         int width = maxId.ToString().Length;
 
         Console.WriteLine($"Maximum Question ID: {maxId}. Filename index padding width: {width}");
 
-        // Group all data by group_index
         var groups = questions.GroupBy(q => q.GroupIndex).OrderBy(g => g.Key);
 
         string directory = Path.GetDirectoryName(filePath) ?? string.Empty;
@@ -785,7 +897,6 @@ async Task SplitQuestionsAsync(string filePath, int chunkSize)
         {
             var groupQuestions = group.ToList();
 
-            // Group questions of this group by their ID range blocks dynamically using chunkSize
             var idBlocks = groupQuestions
                 .GroupBy(q => (q.QuestionId - 1) / chunkSize)
                 .OrderBy(g => g.Key);
@@ -793,10 +904,7 @@ async Task SplitQuestionsAsync(string filePath, int chunkSize)
             foreach (var idBlock in idBlocks)
             {
                 int blockKey = idBlock.Key;
-
                 int startIndex = (blockKey * chunkSize) + 1;
-
-                // Format startIndex with the dynamically calculated padding width, e.g. "D3" for 3 digits
                 string paddedStartIndex = startIndex.ToString("D" + width);
 
                 string groupFileName = $"{fileNameWithoutExt}_{group.Key}_{paddedStartIndex}{extension}";
@@ -823,7 +931,7 @@ async Task SplitQuestionsAsync(string filePath, int chunkSize)
 }
 
 // ==========================================
-// 5. JSON ANALYSIS LOGIC
+// 7. JSON ANALYSIS LOGIC
 // ==========================================
 async Task AnalyzeJsonFileAsync(string filePath)
 {
@@ -832,7 +940,6 @@ async Task AnalyzeJsonFileAsync(string filePath)
         Console.WriteLine($"Reading file for analysis: {filePath}...");
         string jsonContent = await File.ReadAllTextAsync(filePath);
 
-        // Validate JSON structure
         using var doc = JsonDocument.Parse(jsonContent);
 
         var options = new JsonSerializerOptions
@@ -867,7 +974,6 @@ async Task AnalyzeJsonFileAsync(string filePath)
 }
 
 // Helper method to display statistics
-// Helper method to display statistics
 void PrintStatistics(IEnumerable<QuestionItem> questions)
 {
     Console.WriteLine("\n================ STATISTICS ================");
@@ -888,7 +994,6 @@ void PrintStatistics(IEnumerable<QuestionItem> questions)
             Console.WriteLine($"Group {group.Key}: {langCount} questions ({lang})");
         }
 
-        // Display entry count and languages for each question_id within the group
         var idGroups = group.GroupBy(q => q.QuestionId).OrderBy(g => g.Key);
         foreach (var idGroup in idGroups)
         {
