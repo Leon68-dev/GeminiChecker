@@ -18,8 +18,8 @@ if (args.Length < 1)
     Console.WriteLine("  Split questions:          GeminiChecker <input_file_path> [--split (or -spl)] [--count <int>]");
     Console.WriteLine("  Merge & Analyze folder:   GeminiChecker <input_directory_path>");
     Console.WriteLine("  Verify file with Gemini:  GeminiChecker <input_file_path> --check (or -c) --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
-    Console.WriteLine("  Generate questions:       GeminiChecker --generate (or -gen) --topics <topics_json_path> --group <index> --count <int> --level <junior/middle> --start-id <int> --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
-    Console.WriteLine("  Export prompt to file:    GeminiChecker --save-prompt (or -sp, --dump-prompt, -dp) --topics <topics_json_path> --group <index> --count <int> --level <junior/middle> --start-id <int> [--prompt <prompt_file_path>]");
+    Console.WriteLine("  Generate questions:       GeminiChecker --generate (or -gen) --topics <topics_json_path> --group <index> --count <int> --level <Junior/Middle> --start-id <int> --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
+    Console.WriteLine("  Export prompt to file:    GeminiChecker --save-prompt (or -sp, --dump-prompt, -dp) --topics <topics_json_path> --group <index> --count <int> --level <Junior/Middle> --start-id <int> [--prompt <prompt_file_path>]");
     Console.WriteLine("\nOptions:");
     Console.WriteLine("  -st, --stat, --stats      Show detailed question statistics (totals, per group, per language).");
     Console.WriteLine("  -a, --analyze             Alias for statistics and JSON validation.");
@@ -31,7 +31,7 @@ if (args.Length < 1)
     Console.WriteLine("  -t, --topics <path>       Path to topics.json file for subject matter matching.");
     Console.WriteLine("  -g, -grp, --group <idx>   Target group index (topic) for generation (default: 0).");
     Console.WriteLine("  -cnt, --count <int>       Number of unique questions per chunk (for split mode) or to generate (default: 8).");
-    Console.WriteLine("  -l, --level <string>      Difficulty level (e.g., junior, middle, senior) (default: junior).");
+    Console.WriteLine("  -l, --level <string>      Difficulty level (e.g., Junior, Middle, senior) (default: Junior).");
     Console.WriteLine("  -s, --start-id <int>      Starting question_id for newly generated questions (default: 1).");
     Console.WriteLine("  -k, --key <api_key>       Your Google AI Studio API Key (fallback: GEMINI_API_KEY environment variable).");
     Console.WriteLine("  -m, --model <model_name>  Select Gemini model name (default: gemini-3.6-flash).");
@@ -65,7 +65,7 @@ bool isAnalyzeMode = args.Contains("--analyze", StringComparer.OrdinalIgnoreCase
 string topicsPath = string.Empty;
 int groupIndex = 0;
 int count = 8; // Reused as chunkSize in split mode and questionCount in generate mode
-string level = "junior";
+string level = "Junior";
 int startId = 1;
 string promptFilePath = string.Empty;
 string apiKey = string.Empty;
@@ -276,6 +276,49 @@ else
 }
 
 // ==========================================
+// 0. JSON CLEANER HELPER
+// ==========================================
+string CleanJsonString(string raw)
+{
+    if (string.IsNullOrWhiteSpace(raw)) return raw;
+
+    string cleaned = raw.Trim();
+
+    // Extract cleanly between JSON array brackets [ ... ]
+    int firstBracket = cleaned.IndexOf('[');
+    int lastBracket = cleaned.LastIndexOf(']');
+
+    if (firstBracket != -1 && lastBracket != -1 && lastBracket > firstBracket)
+    {
+        return cleaned.Substring(firstBracket, lastBracket - firstBracket + 1);
+    }
+
+    // Fallback: Check for JSON object { ... }
+    int firstBrace = cleaned.IndexOf('{');
+    int lastBrace = cleaned.LastIndexOf('}');
+    if (firstBrace != -1 && lastBrace != -1 && lastBrace > firstBrace)
+    {
+        return cleaned.Substring(firstBrace, lastBrace - firstBrace + 1);
+    }
+
+    // Fallback: Strip markdown code fences if brackets were not found cleanly
+    if (cleaned.StartsWith("```"))
+    {
+        int firstLineEnd = cleaned.IndexOf('\n');
+        if (firstLineEnd != -1)
+        {
+            cleaned = cleaned.Substring(firstLineEnd).Trim();
+        }
+        if (cleaned.EndsWith("```"))
+        {
+            cleaned = cleaned.Substring(0, cleaned.Length - 3).Trim();
+        }
+    }
+
+    return cleaned;
+}
+
+// ==========================================
 // 1. ASSEMBLE PROMPT HELPER
 // ==========================================
 async Task<(string FullPrompt, string OutputDirectory)> BuildPromptAsync(string tPath, int gIdx, int qCount, string qLevel, int sId, string promptPath)
@@ -290,9 +333,14 @@ async Task<(string FullPrompt, string OutputDirectory)> BuildPromptAsync(string 
     if (string.IsNullOrEmpty(directory)) directory = Directory.GetCurrentDirectory();
 
     Console.WriteLine("Reading topics.json...");
-    string topicsContent = await File.ReadAllTextAsync(tPath);
+    string topicsContent = CleanJsonString(await File.ReadAllTextAsync(tPath));
 
-    var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+    var options = new JsonSerializerOptions 
+    { 
+        PropertyNameCaseInsensitive = true,
+        AllowTrailingCommas = true,
+        ReadCommentHandling = JsonCommentHandling.Skip
+    };
     var topics = JsonSerializer.Deserialize<TopicItem[]>(topicsContent, options);
 
     if (topics == null || topics.Length == 0)
@@ -325,7 +373,7 @@ async Task<(string FullPrompt, string OutputDirectory)> BuildPromptAsync(string 
     {
         try
         {
-            string content = await File.ReadAllTextAsync(file);
+            string content = CleanJsonString(await File.ReadAllTextAsync(file));
             var questions = JsonSerializer.Deserialize<QuestionItem[]>(content, options);
             if (questions != null)
             {
@@ -514,26 +562,17 @@ async Task GenerateQuestionsAsync(string tPath, int gIdx, int qCount, string qLe
         }
 
         rawTextReceived = response.Text;
-        string processedJson = rawTextReceived.Trim();
-
-        // Clean up markdown block wrapping
-        if (processedJson.StartsWith("```"))
-        {
-            int firstLineEnd = processedJson.IndexOf('\n');
-            if (firstLineEnd != -1)
-            {
-                processedJson = processedJson.Substring(firstLineEnd).Trim();
-            }
-            if (processedJson.EndsWith("```"))
-            {
-                processedJson = processedJson.Substring(0, processedJson.Length - 3).Trim();
-            }
-        }
+        string processedJson = CleanJsonString(rawTextReceived);
 
         // Verify JSON before saving
         try
         {
-            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var options = new JsonSerializerOptions 
+            { 
+                PropertyNameCaseInsensitive = true,
+                AllowTrailingCommas = true,
+                ReadCommentHandling = JsonCommentHandling.Skip
+            };
             var generatedQuestions = JsonSerializer.Deserialize<QuestionItem[]>(processedJson, options);
             if (generatedQuestions == null || generatedQuestions.Length == 0)
             {
@@ -603,7 +642,7 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
     try
     {
         Console.WriteLine($"Reading file: {filePath}...");
-        string originalJson = await File.ReadAllTextAsync(filePath);
+        string originalJson = CleanJsonString(await File.ReadAllTextAsync(filePath));
 
         // Strict non-negotiable format rules that ensure Gemini never breaks the output JSON structure
         string strictFormatRules =
@@ -684,16 +723,14 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
             Environment.Exit(1);
         }
 
-        string processedJson = response.Text.Trim();
+        string rawResponse = response.Text.Trim();
+        string processedJson = CleanJsonString(rawResponse);
 
         // Check if the response contains a JSON array
-        int firstBracket = processedJson.IndexOf('[');
-        int lastBracket = processedJson.LastIndexOf(']');
-
-        if (firstBracket == -1 || lastBracket == -1 || lastBracket <= firstBracket)
+        if (!processedJson.StartsWith("[") || !processedJson.EndsWith("]"))
         {
             // Check if Gemini returned conversational text indicating that everything is already correct
-            string lowerText = processedJson.ToLowerInvariant();
+            string lowerText = rawResponse.ToLowerInvariant();
             bool isAlreadyCorrect = lowerText.Contains("correct") ||
                                      lowerText.Contains("no changes") ||
                                      lowerText.Contains("looks good") ||
@@ -709,17 +746,19 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
 
             Console.WriteLine("\n[ERROR] Gemini did not return a valid JSON array.");
             Console.WriteLine("Response received from Gemini:");
-            Console.WriteLine(processedJson);
+            Console.WriteLine(rawResponse);
             Environment.Exit(1);
         }
-
-        // Extract the JSON array cleanly
-        processedJson = processedJson.Substring(firstBracket, lastBracket - firstBracket + 1);
 
         // Verify if it is a valid JSON before saving
         try
         {
-            using var doc = JsonDocument.Parse(processedJson);
+            var docOptions = new JsonDocumentOptions
+            {
+                AllowTrailingCommas = true,
+                CommentHandling = JsonCommentHandling.Skip
+            };
+            using var doc = JsonDocument.Parse(processedJson, docOptions);
         }
         catch (JsonException ex)
         {
@@ -819,17 +858,40 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
         var allQuestions = new List<QuestionItem>();
         var options = new JsonSerializerOptions
         {
-            PropertyNameCaseInsensitive = true
+            PropertyNameCaseInsensitive = true,
+            AllowTrailingCommas = true,
+            ReadCommentHandling = JsonCommentHandling.Skip
         };
+
+        bool hasErrors = false;
 
         foreach (var file in filesToProcess)
         {
-            string content = await File.ReadAllTextAsync(file);
-            var questions = JsonSerializer.Deserialize<QuestionItem[]>(content, options);
-            if (questions != null)
+            try
             {
-                allQuestions.AddRange(questions);
+                string content = CleanJsonString(await File.ReadAllTextAsync(file));
+                var questions = JsonSerializer.Deserialize<QuestionItem[]>(content, options);
+                if (questions != null)
+                {
+                    allQuestions.AddRange(questions);
+                }
             }
+            catch (JsonException ex)
+            {
+                hasErrors = true;
+                Console.WriteLine($"\n[ERROR] Failed to read JSON in file: {Path.GetFileName(file)}");
+                Console.WriteLine($"Details: {ex.Message}");
+                if (ex.LineNumber.HasValue)
+                {
+                    Console.WriteLine($"Line: {ex.LineNumber.Value}, Position: {ex.BytePositionInLine}");
+                }
+            }
+        }
+
+        if (hasErrors)
+        {
+            Console.WriteLine("\nMerging aborted due to JSON errors in one or more files. Please fix them and retry.");
+            return;
         }
 
         if (allQuestions.Count == 0)
@@ -838,10 +900,23 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
             return;
         }
 
+        // Порядок мов за замовчуванням
+        var langOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "en", 1 },
+            { "uk", 2 },
+            { "de", 3 },
+            { "es", 4 },
+            { "fr", 5 }
+        };
+
+        // Головне сортування за question_id (1, 2, 3...) та фіксований порядок мов
         var orderedQuestions = allQuestions
             .GroupBy(q => new { q.GroupIndex, q.QuestionId, Lang = q.Lang.ToLower().Trim() })
             .Select(g => g.First())
             .OrderBy(q => q.QuestionId)
+            .ThenBy(q => langOrder.TryGetValue(q.Lang.Trim(), out int ord) ? ord : 99)
+            .ThenBy(q => q.GroupIndex)
             .ToList();
 
         string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
@@ -874,11 +949,13 @@ async Task SplitQuestionsAsync(string filePath, int chunkSize)
     try
     {
         Console.WriteLine($"Reading data from file {filePath}...");
-        string jsonContent = await File.ReadAllTextAsync(filePath);
+        string jsonContent = CleanJsonString(await File.ReadAllTextAsync(filePath));
 
         var options = new JsonSerializerOptions
         {
-            PropertyNameCaseInsensitive = true
+            PropertyNameCaseInsensitive = true,
+            AllowTrailingCommas = true,
+            ReadCommentHandling = JsonCommentHandling.Skip
         };
 
         var questions = JsonSerializer.Deserialize<QuestionItem[]>(jsonContent, options);
@@ -955,13 +1032,20 @@ async Task AnalyzeJsonFileAsync(string filePath)
     try
     {
         Console.WriteLine($"Reading file for analysis: {filePath}...");
-        string jsonContent = await File.ReadAllTextAsync(filePath);
+        string jsonContent = CleanJsonString(await File.ReadAllTextAsync(filePath));
 
-        using var doc = JsonDocument.Parse(jsonContent);
+        var docOptions = new JsonDocumentOptions
+        {
+            AllowTrailingCommas = true,
+            CommentHandling = JsonCommentHandling.Skip
+        };
+        using var doc = JsonDocument.Parse(jsonContent, docOptions);
 
         var options = new JsonSerializerOptions
         {
-            PropertyNameCaseInsensitive = true
+            PropertyNameCaseInsensitive = true,
+            AllowTrailingCommas = true,
+            ReadCommentHandling = JsonCommentHandling.Skip
         };
 
         var questions = JsonSerializer.Deserialize<QuestionItem[]>(jsonContent, options);
