@@ -15,6 +15,7 @@ if (args.Length < 1)
 {
     Console.WriteLine("Usage:");
     Console.WriteLine("  View statistics (file):   GeminiChecker <input_file_path> --stats (or --stat, -st, -a, --analyze)");
+    Console.WriteLine("  Sort questions by ID:     GeminiChecker <input_file_path> --sort (or -srt)");
     Console.WriteLine("  Split questions:          GeminiChecker <input_file_path> [--split (or -spl)] [--count <int>]");
     Console.WriteLine("  Merge & Analyze folder:   GeminiChecker <input_directory_path>");
     Console.WriteLine("  Verify file with Gemini:  GeminiChecker <input_file_path> --check (or -c) --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
@@ -23,6 +24,7 @@ if (args.Length < 1)
     Console.WriteLine("\nOptions:");
     Console.WriteLine("  -st, --stat, --stats      Show detailed question statistics (totals, per group, per language).");
     Console.WriteLine("  -a, --analyze             Alias for statistics and JSON validation.");
+    Console.WriteLine("  -srt, --sort              Sort questions in the file by question_id (and language) and save to *_sorted.json.");
     Console.WriteLine("  -spl, --split             Explicitly trigger split mode on the specified file.");
     Console.WriteLine("  -c, --check               Trigger Gemini verification/correction mode on the specified file.");
     Console.WriteLine("  -gen, --generate          Trigger Gemini question generation mode.");
@@ -55,6 +57,9 @@ bool isCheckMode = args.Contains("--check", StringComparer.OrdinalIgnoreCase) ||
 
 bool isSplitMode = args.Contains("--split", StringComparer.OrdinalIgnoreCase) ||
                    args.Contains("-spl", StringComparer.OrdinalIgnoreCase);
+
+bool isSortMode = args.Contains("--sort", StringComparer.OrdinalIgnoreCase) ||
+                  args.Contains("-srt", StringComparer.OrdinalIgnoreCase);
 
 bool isAnalyzeMode = args.Contains("--analyze", StringComparer.OrdinalIgnoreCase) ||
                      args.Contains("-a", StringComparer.OrdinalIgnoreCase) ||
@@ -163,6 +168,10 @@ for (int i = 0; i < args.Length; i++)
     {
         continue;
     }
+    if (arg.Equals("--sort", StringComparison.OrdinalIgnoreCase) || arg.Equals("-srt", StringComparison.OrdinalIgnoreCase))
+    {
+        continue;
+    }
     if (arg.Equals("--analyze", StringComparison.OrdinalIgnoreCase) ||
         arg.Equals("-a", StringComparison.OrdinalIgnoreCase) ||
         arg.Equals("--stats", StringComparison.OrdinalIgnoreCase) ||
@@ -239,6 +248,15 @@ else if (isAnalyzeMode)
         Environment.Exit(1);
     }
     await AnalyzeJsonFileAsync(inputPath);
+}
+else if (isSortMode)
+{
+    if (!File.Exists(inputPath))
+    {
+        Console.WriteLine($"Error: File '{inputPath}' not found for sorting.");
+        Environment.Exit(1);
+    }
+    await SortQuestionsByIdAsync(inputPath);
 }
 else if (isCheckMode)
 {
@@ -1057,6 +1075,82 @@ async Task AnalyzeJsonFileAsync(string filePath)
 
         Console.WriteLine($"JSON syntax is valid. Total records: {questions.Length}");
         PrintStatistics(questions);
+    }
+    catch (JsonException jsonEx)
+    {
+        Console.WriteLine($"[ERROR] JSON format is invalid: {jsonEx.Message}");
+        if (jsonEx.LineNumber.HasValue)
+        {
+            Console.WriteLine($"Line: {jsonEx.LineNumber.Value}, Position: {jsonEx.BytePositionInLine}");
+        }
+        Environment.Exit(1);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"An unexpected error occurred: {ex.Message}");
+        Environment.Exit(1);
+    }
+}
+
+// ==========================================
+// 8. SORT QUESTIONS BY ID LOGIC
+// ==========================================
+async Task SortQuestionsByIdAsync(string filePath)
+{
+    try
+    {
+        Console.WriteLine($"Reading file for sorting: {filePath}...");
+        string jsonContent = CleanJsonString(await File.ReadAllTextAsync(filePath));
+
+        var options = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            AllowTrailingCommas = true,
+            ReadCommentHandling = JsonCommentHandling.Skip
+        };
+
+        var questions = JsonSerializer.Deserialize<QuestionItem[]>(jsonContent, options);
+        if (questions == null || questions.Length == 0)
+        {
+            Console.WriteLine("Error: File contains no questions or failed to deserialize.");
+            return;
+        }
+
+        // Порядок мов
+        var langOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "en", 1 },
+            { "uk", 2 },
+            { "de", 3 },
+            { "es", 4 },
+            { "fr", 5 }
+        };
+
+        // Сортування: спершу за question_id, потім за мовами, потім за group_index
+        var sortedQuestions = questions
+            .OrderBy(q => q.QuestionId)
+            .ThenBy(q => langOrder.TryGetValue(q.Lang?.Trim() ?? string.Empty, out int ord) ? ord : 99)
+            .ThenBy(q => q.GroupIndex)
+            .ToList();
+
+        string directory = Path.GetDirectoryName(filePath) ?? string.Empty;
+        string fileNameWithoutExt = Path.GetFileNameWithoutExtension(filePath);
+        string extension = Path.GetExtension(filePath);
+
+        string outputFileName = $"{fileNameWithoutExt}_sorted{extension}";
+        string outputPath = Path.Combine(directory, outputFileName);
+
+        var writeOptions = new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+        };
+
+        string outputJson = JsonSerializer.Serialize(sortedQuestions, writeOptions);
+        await File.WriteAllTextAsync(outputPath, outputJson);
+
+        Console.WriteLine($"\nSuccess! Sorted {sortedQuestions.Count} records by question_id.");
+        Console.WriteLine($"Output file created: {outputPath}");
     }
     catch (JsonException jsonEx)
     {
