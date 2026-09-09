@@ -458,15 +458,34 @@ async Task<(string FullPrompt, string OutputDirectory)> BuildPromptAsync(string 
         $"For EACH unique question_id, you must generate exactly 5 translations (one for each language: en, uk, de, es, fr).\n" +
         $"The questions must be perfectly aligned with the topics defined for this group in each language:\n" +
         $"{topicGuidelines}\n\n" +
-        $"Requirements for each question object:\n" +
-        $"1. 'question_id' must be the same integer across all 5 language translations.\n" +
-        $"2. 'lang' must be exactly 'en', 'uk', 'de', 'es', or 'fr'.\n" +
-        $"3. 'level' must be exactly '{qLevel}'.\n" +
-        $"4. 'group_index' must be exactly {gIdx}.\n" +
-        $"5. 'question' must be unique, clear, factual, and accurate. Use domain-specific terminology, formulas, code snippets, or relevant examples without repeating concepts tested in other question_ids.\n" +
-        $"6. 'answer_a', 'answer_b', 'answer_c', 'answer_d' must contain the choices.\n" +
-        $"7. 'answer_win' must be exactly 'a', 'b', 'c', or 'd'. It MUST be identical across all 5 translations for that question_id and follow the cyclical sequence (a, b, c, d, a, b, c, d...).\n" +
-        $"8. 'explanation' must be approximately 5 sentences long explaining the reasoning.\n\n" +
+        $"CRITICAL JSON OUTPUT FORMAT REQUIREMENTS:\n" +
+        $"- Your output MUST be ONLY a single valid JSON array containing all generated question objects.\n" +
+        $"- Do NOT include any Markdown formatting, conversational preamble, code block wrappers (like ```json), or trailing notes.\n" +
+        $"- Every single object in the array MUST strictly adhere to the exact structure and field names shown below:\n\n" +
+        $"[\n" +
+        $"  {{\n" +
+        $"    \"question_id\": {sId},\n" +
+        $"    \"lang\": \"en\",\n" +
+        $"    \"level\": \"{qLevel}\",\n" +
+        $"    \"group_index\": {gIdx},\n" +
+        $"    \"question\": \"Question text here\",\n" +
+        $"    \"answer_a\": \"First option\",\n" +
+        $"    \"answer_b\": \"Second option\",\n" +
+        $"    \"answer_c\": \"Third option\",\n" +
+        $"    \"answer_d\": \"Fourth option\",\n" +
+        $"    \"answer_win\": \"a\",\n" +
+        $"    \"explanation\": \"Detailed explanation here (approx. 5 sentences).\"\n" +
+        $"  }}\n" +
+        $"]\n\n" +
+        $"Field Details:\n" +
+        $"1. 'question_id' (integer): Identical across all 5 language translations for that question.\n" +
+        $"2. 'lang' (string): Must be strictly one of: 'en', 'uk', 'de', 'es', 'fr'.\n" +
+        $"3. 'level' (string): Must be exactly '{qLevel}'.\n" +
+        $"4. 'group_index' (integer): Must be exactly {gIdx}.\n" +
+        $"5. 'question' (string): Must be unique, clear, factual, and accurate.\n" +
+        $"6. 'answer_a', 'answer_b', 'answer_c', 'answer_d' (strings): The 4 multiple choice options.\n" +
+        $"7. 'answer_win' (string): Exactly 'a', 'b', 'c', or 'd'. Must be identical across all 5 translations for the same question_id and follow the cyclical pattern (a, b, c, d...).\n" +
+        $"8. 'explanation' (string): Approximately 5 sentences detailing the reasoning.\n\n" +
         blacklistPrompt;
 
     string fullPrompt = $"{systemPrompt}\n\n{generationInstruction}";
