@@ -554,14 +554,14 @@ async Task GenerateTopicsAsync(
 
     if (string.IsNullOrWhiteSpace(targetSubject))
     {
-        Console.WriteLine("Error: Please provide a target subject using --subject (e.g., --subject \"C++ Memory Management\").");
+        Console.WriteLine("Error: Please provide a target subject using --subject (e.g., --subject \"C#\").");
         Environment.Exit(1);
     }
 
-    if (totalCount <= 0) totalCount = 10;
-    if (batchSize <= 0) batchSize = 5;
+    if (totalCount <= 0) totalCount = 8;
+    if (batchSize <= 0) batchSize = 4;
 
-    Console.WriteLine($"\n[TOPIC GENERATION] Target: {totalCount} total topics for '{targetSubject}' (batch size: {batchSize})...");
+    Console.WriteLine($"\n[TOPIC GENERATION] Target: {totalCount} broad interview categories for '{targetSubject}'...");
     string sampleJson = CleanJsonString(await File.ReadAllTextAsync(sampleTopicsPath));
 
     var options = new JsonSerializerOptions
@@ -572,7 +572,7 @@ async Task GenerateTopicsAsync(
     };
 
     // -------------------------------------------------------------
-    // STEP 1: ITERATIVE ENGLISH TOPIC GENERATION
+    // STEP 1: GENERATE ORDERED CURRICULUM TOPICS (ENGLISH)
     // -------------------------------------------------------------
     var englishTopics = new List<string>();
     int iteration = 1;
@@ -580,25 +580,38 @@ async Task GenerateTopicsAsync(
     while (englishTopics.Count < totalCount)
     {
         int needed = Math.Min(batchSize, totalCount - englishTopics.Count);
-        Console.WriteLine($"\n[Iteration {iteration}] Generating {needed} topics in English ({englishTopics.Count}/{totalCount} generated so far)...");
+        int currentStartIndex = englishTopics.Count;
+        int currentEndIndex = currentStartIndex + needed - 1;
 
-        string exclusionList = englishTopics.Count > 0
-            ? "CRITICAL: You MUST NOT duplicate, repeat, or closely rephrase any of these already generated topics:\n" +
-              string.Join("\n", englishTopics.Select((t, i) => $"{i + 1}. {t}"))
-            : "No previous topics generated yet.";
+        Console.WriteLine($"\n[Iteration {iteration}] Generating topic slots {currentStartIndex} to {currentEndIndex} ({englishTopics.Count}/{totalCount} total)...");
+
+        string structuralRule = string.Empty;
+        if (currentStartIndex == 0)
+        {
+            structuralRule += "- SLOT 0 (CRITICAL FIRST TOPIC): MUST ALWAYS be the core fundamental topic: 'Core " + targetSubject + " & OOP / Language Fundamentals'.\n";
+        }
+        if (currentEndIndex == totalCount - 1)
+        {
+            structuralRule += "- FINAL SLOT (CRITICAL LAST TOPIC): MUST ALWAYS be practical problem-solving: 'Practical Coding Tasks & Problem Solving'.\n";
+        }
+
+        string previousTopicsPrompt = englishTopics.Count > 0
+            ? "ALREADY ASSIGNED SLOTS (DO NOT DUPLICATE):\n" + string.Join("\n", englishTopics.Select((t, i) => $"Slot {i}: {t}")) + "\n"
+            : string.Empty;
 
         string enPrompt =
-            $"You are an expert technical curriculum designer.\n" +
-            $"Analyze the technical level and scope of this reference topics file:\n{sampleJson}\n\n" +
-            $"TASK:\n" +
-            $"Generate exactly {needed} unique, distinct, and important interview topics for the subject: '{targetSubject}'.\n" +
-            $"All topics MUST be in ENGLISH only.\n" +
-            $"- Search or source authentic interview topics asked by US and European tech companies.\n" +
-            $"- Each topic must cover a distinct architectural, language, or system concept.\n\n" +
-            $"{exclusionList}\n\n" +
+            $"You are an expert technical curriculum architect designing interview question categories.\n" +
+            $"Analyze the reference structure from this sample file:\n{sampleJson}\n\n" +
+            $"TARGET: Generate exactly {needed} BROAD, HIGH-LEVEL interview category titles for '{targetSubject}'.\n" +
+            $"Slots to fill: from Slot {currentStartIndex} to Slot {currentEndIndex} out of {totalCount} total categories.\n\n" +
+            $"STRICT STRUCTURAL RULES:\n" +
+            $"{structuralRule}" +
+            $"- BROAD PILLARS ONLY: Topics must be overarching curriculum categories (like 'Collections & LINQ', 'Asynchrony & Concurrency', 'Databases & ORM', 'Architecture & Patterns'), NOT narrow micro-topics.\n" +
+            $"- LOGICAL PROGRESSION: Follow a natural progression from fundamentals up to architecture and practical coding.\n" +
+            $"- NO INTERNAL REASONING: Do NOT generate internal thought processes, explanations, or thinking blocks. Output JSON immediately.\n\n" +
+            $"{previousTopicsPrompt}\n" +
             $"CRITICAL OUTPUT FORMAT:\n" +
-            $"- Return ONLY a valid JSON array of strings: [\"Topic Name 1\", \"Topic Name 2\", ...]\n" +
-            $"- No markdown code fences (no ```json), no backticks, no comments.";
+            $"Return ONLY a JSON array of strings containing exactly {needed} category titles, e.g. [\"Category 1\", \"Category 2\"].";
 
         string rawEn = await CallAiAsync(enPrompt, providerType, apiToken, selectedModel, localApiUrl);
         string cleanedEn = CleanJsonString(rawEn);
@@ -615,86 +628,85 @@ async Task GenerateTopicsAsync(
                         !englishTopics.Any(et => string.Equals(et, trimmed, StringComparison.OrdinalIgnoreCase)))
                     {
                         englishTopics.Add(trimmed);
-                        Console.WriteLine($"  + Added: \"{trimmed}\"");
+                        Console.WriteLine($"  [Slot {englishTopics.Count - 1}] -> \"{trimmed}\"");
                         if (englishTopics.Count >= totalCount) break;
                     }
                 }
             }
             else
             {
-                Console.WriteLine("[WARN] Model returned an empty batch. Retrying iteration...");
+                Console.WriteLine("[WARN] Received empty batch. Retrying iteration...");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[WARN] Failed to parse batch JSON: {ex.Message}. Retrying iteration...");
+            Console.WriteLine($"[WARN] JSON parsing failed: {ex.Message}. Retrying iteration...");
         }
 
         iteration++;
         if (iteration > (totalCount / batchSize + 5))
         {
-            Console.WriteLine("[WARN] Exceeded maximum iteration limit. Proceeding with collected topics.");
+            Console.WriteLine("[WARN] Maximum iteration limit reached. Proceeding with collected topics.");
             break;
         }
     }
 
-    Console.WriteLine($"\n[SUCCESS] English topic generation complete: {englishTopics.Count} unique topics ready.");
+    Console.WriteLine($"\n[SUCCESS] Category structure finalized: {englishTopics.Count} categories ready.");
 
     // -------------------------------------------------------------
-    // STEP 2: TRANSLATION INTO 5 LANGUAGES (en, uk, de, es, fr)
+    // STEP 2: TRANSLATE ONE-BY-ONE (AVOIDS TIMEOUTS & REASONING STALLS)
     // -------------------------------------------------------------
-    Console.WriteLine("\n[TRANSLATION] Translating topics into 5 languages (en, uk, de, es, fr) in batches...");
+    Console.WriteLine("\n[TRANSLATION] Translating categories one by one into 5 languages (en, uk, de, es, fr)...");
     var allTopicItems = new List<TopicItem>();
 
-    var batches = englishTopics
-        .Select((name, index) => new { GroupIndex = index, Name = name })
-        .Chunk(batchSize);
-
-    int batchNum = 1;
-    foreach (var batch in batches)
+    for (int i = 0; i < englishTopics.Count; i++)
     {
-        var batchList = batch.ToList();
-        int startGrp = batchList.First().GroupIndex;
-        int endGrp = batchList.Last().GroupIndex;
-        Console.WriteLine($"\n -> Translating topic groups {startGrp} to {endGrp} (batch {batchNum})...");
-
-        string itemsToTranslate = JsonSerializer.Serialize(batchList.Select(b => new { group_index = b.GroupIndex, name = b.Name }));
+        string topicName = englishTopics[i];
+        Console.WriteLine($"\n -> Translating Group {i}: \"{topicName}\" into [en, uk, de, es, fr]...");
 
         string transPrompt =
-            $"You are an expert technical translator.\n" +
-            $"Translate the following technical topics into exactly 5 languages: 'en', 'uk', 'de', 'es', 'fr'.\n" +
-            $"Input JSON topics:\n{itemsToTranslate}\n\n" +
-            $"TASK:\n" +
-            $"For each topic, output 5 objects with keys:\n" +
-            $"- \"group_index\" (int): preserve exact group_index from input\n" +
-            $"- \"lang\" (string): strictly one of 'en', 'uk', 'de', 'es', 'fr'\n" +
-            $"- \"name\" (string): localized topic name using standard industry terminology\n\n" +
-            $"CRITICAL OUTPUT FORMAT:\n" +
-            $"- Return ONLY a single valid JSON array of topic objects.\n" +
-            $"- NO backticks, NO markdown blocks.";
+            $"Translate the following single technical interview category into exactly 5 languages: 'en', 'uk', 'de', 'es', 'fr'.\n" +
+            $"Category: \"{topicName}\"\n" +
+            $"Target Group Index: {i}\n\n" +
+            $"RULES:\n" +
+            $"- Provide accurate, natural technical terminology used by software engineers in each language.\n" +
+            $"- group_index MUST be strictly {i}.\n" +
+            $"- lang MUST be one of: 'en', 'uk', 'de', 'es', 'fr'.\n" +
+            $"- NO INTERNAL REASONING: Output raw JSON immediately without any thought blocks.\n\n" +
+            $"OUTPUT FORMAT: Return ONLY a valid JSON array of 5 objects with keys: \"group_index\", \"lang\", \"name\".";
 
-        try
+        bool success = false;
+        for (int attempt = 1; attempt <= 2 && !success; attempt++)
         {
-            string rawTrans = await CallAiAsync(transPrompt, providerType, apiToken, selectedModel, localApiUrl);
-            string cleanedTrans = CleanJsonString(rawTrans);
+            try
+            {
+                string rawTrans = await CallAiAsync(transPrompt, providerType, apiToken, selectedModel, localApiUrl);
+                string cleanedTrans = CleanJsonString(rawTrans);
 
-            var translatedItems = JsonSerializer.Deserialize<List<TopicItem>>(cleanedTrans, options);
-            if (translatedItems != null && translatedItems.Count > 0)
-            {
-                allTopicItems.AddRange(translatedItems);
-                Console.WriteLine("    Done translating batch!");
+                var translatedItems = JsonSerializer.Deserialize<List<TopicItem>>(cleanedTrans, options);
+                if (translatedItems != null && translatedItems.Count == 5)
+                {
+                    allTopicItems.AddRange(translatedItems);
+                    Console.WriteLine("    Successfully translated into 5 languages!");
+                    success = true;
+                }
+                else
+                {
+                    Console.WriteLine($"[WARN] Attempt {attempt}: Received incomplete translation array.");
+                }
             }
-            else
+            catch (Exception ex)
             {
-                Console.WriteLine("[WARN] Received empty translation array.");
+                Console.WriteLine($"[ERROR] Attempt {attempt} failed: {ex.Message}");
             }
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[ERROR] Batch translation failed: {ex.Message}");
-        }
 
-        batchNum++;
+        if (!success)
+        {
+            // Fallback: register English item so slot is never lost
+            allTopicItems.Add(new TopicItem { GroupIndex = i, Lang = "en", Name = topicName });
+            Console.WriteLine($"    [FALLBACK] Preserved English category for group {i}.");
+        }
     }
 
     // -------------------------------------------------------------
@@ -729,6 +741,48 @@ async Task GenerateTopicsAsync(
     await File.WriteAllTextAsync(outPath, JsonSerializer.Serialize(orderedTopics, writeOptions));
     Console.WriteLine($"\n[ALL DONE] Successfully generated and translated {englishTopics.Count} topic groups ({orderedTopics.Count} total records).");
     Console.WriteLine($"Saved to: {outPath}");
+}
+
+// ==========================================
+// WEB SEARCH HELPER (LIVE DUCKDUCKGO SCRAPER)
+// ==========================================
+async Task<string> SearchWebAsync(string query, int maxResults = 5)
+{
+    try
+    {
+        using var client = new HttpClient();
+        client.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        client.Timeout = TimeSpan.FromSeconds(15);
+
+        string searchUrl = $"https://html.duckduckgo.com/html/?q={Uri.EscapeDataString(query)}";
+        string html = await client.GetStringAsync(searchUrl);
+
+        var snippets = new List<string>();
+        var snippetRegex = new Regex(@"<a[^>]*class=""result__snippet[^""]*""[^>]*>(.*?)</a>", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+        var matches = snippetRegex.Matches(html);
+
+        foreach (Match m in matches)
+        {
+            if (m.Success && m.Groups.Count > 1)
+            {
+                string rawText = m.Groups[1].Value;
+                string cleanText = Regex.Replace(rawText, "<.*?>", string.Empty);
+                cleanText = System.Net.WebUtility.HtmlDecode(cleanText).Trim();
+                if (!string.IsNullOrWhiteSpace(cleanText) && cleanText.Length > 20)
+                {
+                    snippets.Add(cleanText);
+                    if (snippets.Count >= maxResults) break;
+                }
+            }
+        }
+
+        return snippets.Count > 0 ? string.Join("\n- ", snippets) : string.Empty;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"    [WARN] Web search query failed: {ex.Message}");
+        return string.Empty;
+    }
 }
 
 // ==========================================
@@ -811,7 +865,6 @@ async Task RunInterviewPipelineAsync(
 
     string strictRules =
         "CORE SOURCING AND STRUCTURAL RULES:\n" +
-        "- INTERNET SEARCH AND SOURCING REQUIREMENT: Search the internet across reputable US and European technical websites, official language specifications, and top interview repositories to find genuine interview questions and practical problems.\n" +
         "- ABSOLUTE PROHIBITION ON BACKTICKS: NEVER use the backtick symbol (`) anywhere in the text. For code elements, function names, types, and keywords, ALWAYS use single quotes ('...') or double quotes (\"...\").\n" +
         "- The correct answer keys MUST follow a strict cyclic sequence across consecutive question_ids: a, b, c, d, a, b, c, d...\n" +
         "- Explanations must be approximately 5 sentences long, clearly detailing why the correct answer is right and why distractors are wrong.\n" +
@@ -835,6 +888,27 @@ async Task RunInterviewPipelineAsync(
         Console.WriteLine("==================================================================");
 
         // ---------------------------------------------------------
+        // LIVE WEB SEARCH GROUNDING
+        // ---------------------------------------------------------
+        string searchQuery = $"{topicNameEn} {currentLevel} interview questions real world technical problems";
+        Console.Write($"\n[SEARCH] Performing live web search: \"{searchQuery}\"... ");
+        string searchResults = await SearchWebAsync(searchQuery, 6);
+
+        string searchContext = string.Empty;
+        if (!string.IsNullOrWhiteSpace(searchResults))
+        {
+            Console.WriteLine("Done! Found real web research material.");
+            searchContext =
+                $"\nAUTHENTIC US/EU WEB SEARCH & DOCUMENTATION SNIPPETS:\n" +
+                $"- {searchResults}\n\n" +
+                $"CRITICAL INSTRUCTION: Base your questions, code scenarios, and distractor choices on the real-world concepts found in the web research snippets above.\n";
+        }
+        else
+        {
+            Console.WriteLine("No search results returned. Falling back to internal knowledge.");
+        }
+
+        // ---------------------------------------------------------
         // STEP 1: GENERATE IN ENGLISH ONLY
         // ---------------------------------------------------------
         Console.WriteLine($"\n[1/4] Generating {countPerLevel} questions in ENGLISH ONLY for level '{currentLevel}'...");
@@ -846,13 +920,13 @@ async Task RunInterviewPipelineAsync(
 
         string genEnPrompt =
             $"{customPromptRules}" +
-            $"You are an expert technical interviewer and educator.\n" +
+            $"You are an expert technical interviewer and senior software engineer creating questions for a mobile interview prep app.\n" +
             $"TASK SPECIFICATION:\n" +
             $"- Target Topic: '{topicNameEn}' (Group Index: {gIdx})\n" +
             $"- Difficulty Level: '{currentLevel}'\n" +
             $"- Question ID Range: {currentStartId} to {endId} (Total: {countPerLevel} questions)\n" +
             $"- Language: English only ('lang': 'en')\n\n" +
-            $"- WEB SEARCH INSTRUCTION: Search the internet across authentic US and European tech company interview resources, developer portals, and official documentation to select high-value, realistic questions.\n" +
+            $"{searchContext}" +
             $"{strictRules}\n" +
             $"{blacklistPrompt}\n\n" +
             $"Return ONLY a valid JSON array of objects with keys: " +
