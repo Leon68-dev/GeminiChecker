@@ -5,6 +5,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -21,6 +23,8 @@ if (args.Length < 1)
     Console.WriteLine("  Verify file with Gemini:  GeminiChecker <input_file_path> --check (or -c) --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
     Console.WriteLine("  Generate questions:       GeminiChecker --generate (or -gen) --topics <topics_json_path> --group <index> --count <int> --level <Junior/Middle> --start-id <int> --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
     Console.WriteLine("  Export prompt to file:    GeminiChecker --save-prompt (or -sp, --dump-prompt, -dp) --topics <topics_json_path> --group <index> --count <int> --level <Junior/Middle> --start-id <int> [--prompt <prompt_file_path>]");
+    Console.WriteLine("  Generate topic groups:    GeminiChecker --generate-topics (or -gt) --topics <sample_topics_json> --subject <name> [--count <total_count>] [--batch <batch_size>] [--provider <gemini/local>] [--key <api_key>] [--model <model_name>] [--local-url <url>]");
+    Console.WriteLine("  Multi-stage pipeline:     GeminiChecker --pipeline (or -pipe) --topics <topics_json_path> --group <index> [--count <int>] [--start-id <int>] [--provider <gemini/local>] [--key <api_key>] [--model <model_name>] [--local-url <url>] [--prompt <prompt_file_path>]");
     Console.WriteLine("\nOptions:");
     Console.WriteLine("  -st, --stat, --stats      Show detailed question statistics (totals, per group, per language).");
     Console.WriteLine("  -a, --analyze             Alias for statistics and JSON validation.");
@@ -30,14 +34,40 @@ if (args.Length < 1)
     Console.WriteLine("  -gen, --generate          Trigger Gemini question generation mode.");
     Console.WriteLine("  -sp, --save-prompt        Assemble and save the complete generation prompt to a text file without calling API.");
     Console.WriteLine("  -dp, --dump-prompt        Alias for --save-prompt.");
+    Console.WriteLine("  -pipe, --pipeline         Execute multi-stage interview pipeline (Junior -> Middle, EN-first, review, translate 1-by-1).");
+    Console.WriteLine("  -gt, --generate-topics    Generate new topic groups based on a sample topics.json.");
+    Console.WriteLine("  --subject <string>        Target subject or programming language for topic generation.");
+    Console.WriteLine("  -b, --batch <int>         Batch size per iteration for topic generation (default: 5).");
+    Console.WriteLine("  --batch-size <int>        Alias for --batch.");
+    Console.WriteLine("  --provider <string>       AI provider: 'gemini' or 'local' (default: gemini).");
+    Console.WriteLine("  --local-url <url>         Base URL for local OpenAI-compatible endpoint (default: http://localhost:1234/v1).");
     Console.WriteLine("  -t, --topics <path>       Path to topics.json file for subject matter matching.");
     Console.WriteLine("  -g, -grp, --group <idx>   Target group index (topic) for generation (default: 0).");
-    Console.WriteLine("  -cnt, --count <int>       Number of unique questions per chunk (for split mode) or to generate (default: 8).");
+    Console.WriteLine("  -cnt, --count <int>       Number of unique questions per chunk / level / total topic groups (default: 8).");
     Console.WriteLine("  -l, --level <string>      Difficulty level (e.g., Junior, Middle, senior) (default: Junior).");
     Console.WriteLine("  -s, --start-id <int>      Starting question_id for newly generated questions (default: 1).");
     Console.WriteLine("  -k, --key <api_key>       Your Google AI Studio API Key (fallback: GEMINI_API_KEY environment variable).");
-    Console.WriteLine("  -m, --model <model_name>  Select Gemini model name (default: gemini-3.6-flash).");
+    Console.WriteLine("  -m, --model <model_name>  Select AI model name (default: gemini-3.6-flash).");
     Console.WriteLine("  -p, --prompt <file_path>  Path to an external text file containing custom system prompt rules.");
+    Console.WriteLine("\nExamples:");
+    Console.WriteLine("  1. View question statistics:");
+    Console.WriteLine("     GeminiChecker questions.json --stats");
+    Console.WriteLine("  2. Split question file into chunks of 8:");
+    Console.WriteLine("     GeminiChecker questions.json --split --count 8");
+    Console.WriteLine("  3. Merge chunks and analyze directory:");
+    Console.WriteLine("     GeminiChecker ./chunks");
+    Console.WriteLine("  4. Verify questions file with Gemini:");
+    Console.WriteLine("     GeminiChecker questions_0_0001.json --check --key <api_key>");
+    Console.WriteLine("  5. Generate 15 topics in batches of 5 (Local AI):");
+    Console.WriteLine("     GeminiChecker --generate-topics --topics topics_sample.json --subject \"C# Advanced\" --count 15 --batch 5 --provider local --model \"gemma-4-e4b\"");
+    Console.WriteLine("  6. Generate 20 topics in batches of 5 (Gemini):");
+    Console.WriteLine("     GeminiChecker --generate-topics --topics topics_sample.json --subject \"Go Concurrency\" --count 20 --batch 5 --provider gemini --key <api_key>");
+    Console.WriteLine("  7. Run multi-stage pipeline (Junior -> Middle) via Local AI (LM Studio / Ollama):");
+    Console.WriteLine("     GeminiChecker --pipeline --topics topics.json --group 0 --count 8 --start-id 1 --provider local --model \"gemma-4-e4b\"");
+    Console.WriteLine("  8. Run multi-stage pipeline via Cloud Gemini:");
+    Console.WriteLine("     GeminiChecker --pipeline --topics topics.json --group 0 --count 8 --start-id 1 --provider gemini --key <api_key>");
+    Console.WriteLine("  9. Export generation prompt to file without calling API:");
+    Console.WriteLine("     GeminiChecker --save-prompt --topics topics.json --group 0 --count 8 --level Junior --start-id 1");
     return;
 }
 
@@ -51,6 +81,12 @@ bool isSavePromptMode = args.Contains("--save-prompt", StringComparer.OrdinalIgn
                         args.Contains("-sp", StringComparer.OrdinalIgnoreCase) ||
                         args.Contains("--dump-prompt", StringComparer.OrdinalIgnoreCase) ||
                         args.Contains("-dp", StringComparer.OrdinalIgnoreCase);
+
+bool isPipelineMode = args.Contains("--pipeline", StringComparer.OrdinalIgnoreCase) ||
+                      args.Contains("-pipe", StringComparer.OrdinalIgnoreCase);
+
+bool isGenerateTopicsMode = args.Contains("--generate-topics", StringComparer.OrdinalIgnoreCase) ||
+                            args.Contains("-gt", StringComparer.OrdinalIgnoreCase);
 
 bool isCheckMode = args.Contains("--check", StringComparer.OrdinalIgnoreCase) ||
                    args.Contains("-c", StringComparer.OrdinalIgnoreCase);
@@ -69,13 +105,17 @@ bool isAnalyzeMode = args.Contains("--analyze", StringComparer.OrdinalIgnoreCase
 
 string topicsPath = string.Empty;
 int groupIndex = 0;
-int count = 8; // Reused as chunkSize in split mode and questionCount in generate mode
+int count = 8; // Reused as chunkSize, questionCount, or total topic groups count
+int batchSize = 5; // Batch size per iteration for topic generation
 string level = "Junior";
 int startId = 1;
 string promptFilePath = string.Empty;
 string apiKey = string.Empty;
 string modelName = "gemini-3.6-flash";
 string inputPath = null;
+string provider = "gemini";
+string subject = string.Empty;
+string localUrl = "http://localhost:1234/v1";
 
 // Search for topics spec flag
 int topicsIndex = Array.FindIndex(args, arg => arg.Equals("--topics", StringComparison.OrdinalIgnoreCase) ||
@@ -102,6 +142,15 @@ if (countIndex != -1 && countIndex + 1 < args.Length)
     if (int.TryParse(args[countIndex + 1], out int cnt)) count = cnt;
 }
 
+// Search for batch size flag (count per iteration)
+int batchIndex = Array.FindIndex(args, arg => arg.Equals("--batch", StringComparison.OrdinalIgnoreCase) ||
+                                              arg.Equals("--batch-size", StringComparison.OrdinalIgnoreCase) ||
+                                              arg.Equals("-b", StringComparison.OrdinalIgnoreCase));
+if (batchIndex != -1 && batchIndex + 1 < args.Length)
+{
+    if (int.TryParse(args[batchIndex + 1], out int bs) && bs > 0) batchSize = bs;
+}
+
 // Search for level flag
 int levelIndex = Array.FindIndex(args, arg => arg.Equals("--level", StringComparison.OrdinalIgnoreCase) ||
                                              arg.Equals("-l", StringComparison.OrdinalIgnoreCase));
@@ -124,6 +173,27 @@ int promptIndex = Array.FindIndex(args, arg => arg.Equals("--prompt", StringComp
 if (promptIndex != -1 && promptIndex + 1 < args.Length)
 {
     promptFilePath = args[promptIndex + 1];
+}
+
+// Search for provider flag
+int providerIndex = Array.FindIndex(args, arg => arg.Equals("--provider", StringComparison.OrdinalIgnoreCase));
+if (providerIndex != -1 && providerIndex + 1 < args.Length)
+{
+    provider = args[providerIndex + 1].ToLowerInvariant();
+}
+
+// Search for subject flag
+int subjectIndex = Array.FindIndex(args, arg => arg.Equals("--subject", StringComparison.OrdinalIgnoreCase));
+if (subjectIndex != -1 && subjectIndex + 1 < args.Length)
+{
+    subject = args[subjectIndex + 1];
+}
+
+// Search for local API URL flag
+int localUrlIndex = Array.FindIndex(args, arg => arg.Equals("--local-url", StringComparison.OrdinalIgnoreCase));
+if (localUrlIndex != -1 && localUrlIndex + 1 < args.Length)
+{
+    localUrl = args[localUrlIndex + 1];
 }
 
 // Search for key flag
@@ -157,6 +227,14 @@ for (int i = 0; i < args.Length; i++)
     }
     if (arg.Equals("--save-prompt", StringComparison.OrdinalIgnoreCase) || arg.Equals("-sp", StringComparison.OrdinalIgnoreCase) ||
         arg.Equals("--dump-prompt", StringComparison.OrdinalIgnoreCase) || arg.Equals("-dp", StringComparison.OrdinalIgnoreCase))
+    {
+        continue;
+    }
+    if (arg.Equals("--pipeline", StringComparison.OrdinalIgnoreCase) || arg.Equals("-pipe", StringComparison.OrdinalIgnoreCase))
+    {
+        continue;
+    }
+    if (arg.Equals("--generate-topics", StringComparison.OrdinalIgnoreCase) || arg.Equals("-gt", StringComparison.OrdinalIgnoreCase))
     {
         continue;
     }
@@ -195,6 +273,11 @@ for (int i = 0; i < args.Length; i++)
         i++; // Skip its value
         continue;
     }
+    if (arg.Equals("--batch", StringComparison.OrdinalIgnoreCase) || arg.Equals("--batch-size", StringComparison.OrdinalIgnoreCase) || arg.Equals("-b", StringComparison.OrdinalIgnoreCase))
+    {
+        i++; // Skip its value
+        continue;
+    }
     if (arg.Equals("--level", StringComparison.OrdinalIgnoreCase) || arg.Equals("-l", StringComparison.OrdinalIgnoreCase))
     {
         i++; // Skip its value
@@ -220,12 +303,27 @@ for (int i = 0; i < args.Length; i++)
         i++; // Skip its value
         continue;
     }
+    if (arg.Equals("--provider", StringComparison.OrdinalIgnoreCase))
+    {
+        i++; // Skip its value
+        continue;
+    }
+    if (arg.Equals("--subject", StringComparison.OrdinalIgnoreCase))
+    {
+        i++; // Skip its value
+        continue;
+    }
+    if (arg.Equals("--local-url", StringComparison.OrdinalIgnoreCase))
+    {
+        i++; // Skip its value
+        continue;
+    }
 
     inputPath = arg;
     break;
 }
 
-if (string.IsNullOrEmpty(inputPath) && !isGenerateMode && !isSavePromptMode)
+if (string.IsNullOrEmpty(inputPath) && !isGenerateMode && !isSavePromptMode && !isPipelineMode && !isGenerateTopicsMode)
 {
     Console.WriteLine("Error: Missing input file or directory path.");
     Environment.Exit(1);
@@ -235,6 +333,14 @@ if (string.IsNullOrEmpty(inputPath) && !isGenerateMode && !isSavePromptMode)
 if (isSavePromptMode)
 {
     await SavePromptToFileAsync(topicsPath, groupIndex, count, level, startId, promptFilePath);
+}
+else if (isGenerateTopicsMode)
+{
+    await GenerateTopicsAsync(topicsPath, subject, count, batchSize, provider, apiKey, modelName, localUrl);
+}
+else if (isPipelineMode)
+{
+    await RunInterviewPipelineAsync(topicsPath, groupIndex, count, startId, provider, apiKey, modelName, localUrl, promptFilePath);
 }
 else if (isGenerateMode)
 {
@@ -334,6 +440,533 @@ string CleanJsonString(string raw)
     }
 
     return cleaned;
+}
+
+// ==========================================
+// UNIFIED AI CLIENT CALLER WITH 1-SEC TIMER
+// ==========================================
+async Task<string> CallAiAsync(string prompt, string providerType, string apiToken, string selectedModel, string localApiUrl)
+{
+    var stopwatch = Stopwatch.StartNew();
+    Console.Write("    [AI Request] Elapsed: 00:00");
+
+    if (providerType.Equals("local", StringComparison.OrdinalIgnoreCase))
+    {
+        // Call local OpenAI-compatible endpoint (LM Studio, Ollama, etc.)
+        using var httpClient = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
+        var requestPayload = new
+        {
+            model = selectedModel,
+            messages = new[]
+            {
+                new { role = "user", content = prompt }
+            },
+            temperature = 0.3
+        };
+
+        string endpoint = $"{localApiUrl.TrimEnd('/')}/chat/completions";
+        var stringContent = new StringContent(JsonSerializer.Serialize(requestPayload), Encoding.UTF8, "application/json");
+
+        var responseTask = httpClient.PostAsync(endpoint, stringContent);
+
+        while (!responseTask.IsCompleted)
+        {
+            await Task.WhenAny(responseTask, Task.Delay(1000));
+            if (!responseTask.IsCompleted)
+            {
+                Console.Write($"\r    [AI Request] Elapsed: {stopwatch.Elapsed:mm\\:ss}   ");
+            }
+        }
+
+        stopwatch.Stop();
+        Console.WriteLine($"\r    [AI Request] Completed in: {stopwatch.Elapsed:mm\\:ss}!      ");
+
+        var response = await responseTask;
+        response.EnsureSuccessStatusCode();
+
+        string responseBody = await response.Content.ReadAsStringAsync();
+        using var jsonDoc = JsonDocument.Parse(responseBody);
+        var root = jsonDoc.RootElement;
+        if (root.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
+        {
+            var firstChoice = choices[0];
+            if (firstChoice.TryGetProperty("message", out var message) &&
+                message.TryGetProperty("content", out var contentElement))
+            {
+                return contentElement.GetString() ?? string.Empty;
+            }
+        }
+        return string.Empty;
+    }
+    else
+    {
+        // Call cloud Gemini API
+        if (string.IsNullOrWhiteSpace(apiToken))
+        {
+            Console.WriteLine("Error: Gemini API Key is missing. Please provide it using --key / -k option or set GEMINI_API_KEY environment variable.");
+            Environment.Exit(1);
+        }
+
+        var googleAI = new GoogleAI(apiKey: apiToken);
+        var model = googleAI.GenerativeModel(model: selectedModel);
+        var generationConfig = new GenerationConfig
+        {
+            MaxOutputTokens = 65536
+        };
+
+        var responseTask = model.GenerateContent(prompt, generationConfig: generationConfig);
+
+        while (!responseTask.IsCompleted)
+        {
+            await Task.WhenAny(responseTask, Task.Delay(1000));
+            if (!responseTask.IsCompleted)
+            {
+                Console.Write($"\r    [AI Request] Elapsed: {stopwatch.Elapsed:mm\\:ss}   ");
+            }
+        }
+
+        stopwatch.Stop();
+        Console.WriteLine($"\r    [AI Request] Completed in: {stopwatch.Elapsed:mm\\:ss}!      ");
+
+        var response = await responseTask;
+        return response?.Text ?? string.Empty;
+    }
+}
+
+// ==========================================
+// TOPIC GENERATOR LOGIC (ITERATIVE BATCHES)
+// ==========================================
+async Task GenerateTopicsAsync(
+    string sampleTopicsPath,
+    string targetSubject,
+    int totalCount,
+    int batchSize,
+    string providerType,
+    string apiToken,
+    string selectedModel,
+    string localApiUrl)
+{
+    if (string.IsNullOrWhiteSpace(sampleTopicsPath) || !File.Exists(sampleTopicsPath))
+    {
+        Console.WriteLine($"Error: Reference topics file '{sampleTopicsPath}' not found.");
+        Environment.Exit(1);
+    }
+
+    if (string.IsNullOrWhiteSpace(targetSubject))
+    {
+        Console.WriteLine("Error: Please provide a target subject using --subject (e.g., --subject \"C++ Memory Management\").");
+        Environment.Exit(1);
+    }
+
+    if (totalCount <= 0) totalCount = 10;
+    if (batchSize <= 0) batchSize = 5;
+
+    Console.WriteLine($"\n[TOPIC GENERATION] Target: {totalCount} total topics for '{targetSubject}' (batch size: {batchSize})...");
+    string sampleJson = CleanJsonString(await File.ReadAllTextAsync(sampleTopicsPath));
+
+    var options = new JsonSerializerOptions
+    {
+        PropertyNameCaseInsensitive = true,
+        AllowTrailingCommas = true,
+        ReadCommentHandling = JsonCommentHandling.Skip
+    };
+
+    // -------------------------------------------------------------
+    // STEP 1: ITERATIVE ENGLISH TOPIC GENERATION
+    // -------------------------------------------------------------
+    var englishTopics = new List<string>();
+    int iteration = 1;
+
+    while (englishTopics.Count < totalCount)
+    {
+        int needed = Math.Min(batchSize, totalCount - englishTopics.Count);
+        Console.WriteLine($"\n[Iteration {iteration}] Generating {needed} topics in English ({englishTopics.Count}/{totalCount} generated so far)...");
+
+        string exclusionList = englishTopics.Count > 0
+            ? "CRITICAL: You MUST NOT duplicate, repeat, or closely rephrase any of these already generated topics:\n" +
+              string.Join("\n", englishTopics.Select((t, i) => $"{i + 1}. {t}"))
+            : "No previous topics generated yet.";
+
+        string enPrompt =
+            $"You are an expert technical curriculum designer.\n" +
+            $"Analyze the technical level and scope of this reference topics file:\n{sampleJson}\n\n" +
+            $"TASK:\n" +
+            $"Generate exactly {needed} unique, distinct, and important interview topics for the subject: '{targetSubject}'.\n" +
+            $"All topics MUST be in ENGLISH only.\n" +
+            $"- Search or source authentic interview topics asked by US and European tech companies.\n" +
+            $"- Each topic must cover a distinct architectural, language, or system concept.\n\n" +
+            $"{exclusionList}\n\n" +
+            $"CRITICAL OUTPUT FORMAT:\n" +
+            $"- Return ONLY a valid JSON array of strings: [\"Topic Name 1\", \"Topic Name 2\", ...]\n" +
+            $"- No markdown code fences (no ```json), no backticks, no comments.";
+
+        string rawEn = await CallAiAsync(enPrompt, providerType, apiToken, selectedModel, localApiUrl);
+        string cleanedEn = CleanJsonString(rawEn);
+
+        try
+        {
+            var batchTopics = JsonSerializer.Deserialize<List<string>>(cleanedEn, options);
+            if (batchTopics != null && batchTopics.Count > 0)
+            {
+                foreach (var topic in batchTopics)
+                {
+                    string trimmed = topic.Trim();
+                    if (!string.IsNullOrWhiteSpace(trimmed) &&
+                        !englishTopics.Any(et => string.Equals(et, trimmed, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        englishTopics.Add(trimmed);
+                        Console.WriteLine($"  + Added: \"{trimmed}\"");
+                        if (englishTopics.Count >= totalCount) break;
+                    }
+                }
+            }
+            else
+            {
+                Console.WriteLine("[WARN] Model returned an empty batch. Retrying iteration...");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[WARN] Failed to parse batch JSON: {ex.Message}. Retrying iteration...");
+        }
+
+        iteration++;
+        if (iteration > (totalCount / batchSize + 5))
+        {
+            Console.WriteLine("[WARN] Exceeded maximum iteration limit. Proceeding with collected topics.");
+            break;
+        }
+    }
+
+    Console.WriteLine($"\n[SUCCESS] English topic generation complete: {englishTopics.Count} unique topics ready.");
+
+    // -------------------------------------------------------------
+    // STEP 2: TRANSLATION INTO 5 LANGUAGES (en, uk, de, es, fr)
+    // -------------------------------------------------------------
+    Console.WriteLine("\n[TRANSLATION] Translating topics into 5 languages (en, uk, de, es, fr) in batches...");
+    var allTopicItems = new List<TopicItem>();
+
+    var batches = englishTopics
+        .Select((name, index) => new { GroupIndex = index, Name = name })
+        .Chunk(batchSize);
+
+    int batchNum = 1;
+    foreach (var batch in batches)
+    {
+        var batchList = batch.ToList();
+        int startGrp = batchList.First().GroupIndex;
+        int endGrp = batchList.Last().GroupIndex;
+        Console.WriteLine($"\n -> Translating topic groups {startGrp} to {endGrp} (batch {batchNum})...");
+
+        string itemsToTranslate = JsonSerializer.Serialize(batchList.Select(b => new { group_index = b.GroupIndex, name = b.Name }));
+
+        string transPrompt =
+            $"You are an expert technical translator.\n" +
+            $"Translate the following technical topics into exactly 5 languages: 'en', 'uk', 'de', 'es', 'fr'.\n" +
+            $"Input JSON topics:\n{itemsToTranslate}\n\n" +
+            $"TASK:\n" +
+            $"For each topic, output 5 objects with keys:\n" +
+            $"- \"group_index\" (int): preserve exact group_index from input\n" +
+            $"- \"lang\" (string): strictly one of 'en', 'uk', 'de', 'es', 'fr'\n" +
+            $"- \"name\" (string): localized topic name using standard industry terminology\n\n" +
+            $"CRITICAL OUTPUT FORMAT:\n" +
+            $"- Return ONLY a single valid JSON array of topic objects.\n" +
+            $"- NO backticks, NO markdown blocks.";
+
+        try
+        {
+            string rawTrans = await CallAiAsync(transPrompt, providerType, apiToken, selectedModel, localApiUrl);
+            string cleanedTrans = CleanJsonString(rawTrans);
+
+            var translatedItems = JsonSerializer.Deserialize<List<TopicItem>>(cleanedTrans, options);
+            if (translatedItems != null && translatedItems.Count > 0)
+            {
+                allTopicItems.AddRange(translatedItems);
+                Console.WriteLine("    Done translating batch!");
+            }
+            else
+            {
+                Console.WriteLine("[WARN] Received empty translation array.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ERROR] Batch translation failed: {ex.Message}");
+        }
+
+        batchNum++;
+    }
+
+    // -------------------------------------------------------------
+    // STEP 3: FORMAT AND SAVE FINAL TOPICS FILE
+    // -------------------------------------------------------------
+    var langOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+    {
+        { "en", 1 },
+        { "uk", 2 },
+        { "de", 3 },
+        { "es", 4 },
+        { "fr", 5 }
+    };
+
+    var orderedTopics = allTopicItems
+        .OrderBy(t => t.GroupIndex)
+        .ThenBy(t => langOrder.TryGetValue(t.Lang?.Trim() ?? string.Empty, out int ord) ? ord : 99)
+        .ToList();
+
+    string safeSubjectName = Regex.Replace(targetSubject.ToLowerInvariant().Trim(), @"[^a-z0-9]+", "_");
+    string directory = Path.GetDirectoryName(sampleTopicsPath);
+    if (string.IsNullOrEmpty(directory)) directory = Directory.GetCurrentDirectory();
+
+    string outPath = Path.Combine(directory, $"topics_{safeSubjectName}.json");
+
+    var writeOptions = new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    await File.WriteAllTextAsync(outPath, JsonSerializer.Serialize(orderedTopics, writeOptions));
+    Console.WriteLine($"\n[ALL DONE] Successfully generated and translated {englishTopics.Count} topic groups ({orderedTopics.Count} total records).");
+    Console.WriteLine($"Saved to: {outPath}");
+}
+
+// ==========================================
+// MULTI-STAGE INTERVIEW PIPELINE LOGIC
+// ==========================================
+async Task RunInterviewPipelineAsync(
+    string tPath,
+    int gIdx,
+    int countPerLevel,
+    int startingId,
+    string providerType,
+    string apiToken,
+    string selectedModel,
+    string localApiUrl,
+    string promptRulesPath)
+{
+    if (string.IsNullOrWhiteSpace(tPath) || !File.Exists(tPath))
+    {
+        Console.WriteLine($"Error: Topics specification file '{tPath}' not found.");
+        Environment.Exit(1);
+    }
+
+    string directory = Path.GetDirectoryName(tPath);
+    if (string.IsNullOrEmpty(directory)) directory = Directory.GetCurrentDirectory();
+
+    Console.WriteLine($"\nReading topics file: {tPath}...");
+    string topicsContent = CleanJsonString(await File.ReadAllTextAsync(tPath));
+
+    var options = new JsonSerializerOptions
+    {
+        PropertyNameCaseInsensitive = true,
+        AllowTrailingCommas = true,
+        ReadCommentHandling = JsonCommentHandling.Skip
+    };
+
+    var allTopics = JsonSerializer.Deserialize<TopicItem[]>(topicsContent, options);
+    var groupTopics = allTopics?.Where(t => t.GroupIndex == gIdx).ToList();
+
+    if (groupTopics == null || groupTopics.Count == 0)
+    {
+        Console.WriteLine($"Error: No topics found for group index {gIdx} in '{tPath}'.");
+        Environment.Exit(1);
+    }
+
+    string topicNameEn = groupTopics.FirstOrDefault(t => t.Lang.Equals("en", StringComparison.OrdinalIgnoreCase))?.Name ?? "General Technical";
+    string topicGuidelines = string.Join("\n", groupTopics.Select(t => $"- Language '{t.Lang}': Topic name is \"{t.Name}\""));
+
+    // Compile duplicate blacklist from existing questions in directory
+    Console.WriteLine("Scanning directory for pre-existing questions to build exclusion blacklist...");
+    var blacklist = new List<string>();
+    var regex = new Regex(@"^.+_\d+_\d+.*\.json$", RegexOptions.IgnoreCase);
+
+    foreach (var file in Directory.GetFiles(directory, "*.json").Where(f => regex.IsMatch(Path.GetFileName(f))))
+    {
+        try
+        {
+            string content = CleanJsonString(await File.ReadAllTextAsync(file));
+            var items = JsonSerializer.Deserialize<QuestionItem[]>(content, options);
+            if (items != null)
+            {
+                var enItems = items.Where(q => q.GroupIndex == gIdx && string.Equals(q.Lang, "en", StringComparison.OrdinalIgnoreCase));
+                foreach (var q in enItems)
+                {
+                    if (!string.IsNullOrWhiteSpace(q.Question)) blacklist.Add(q.Question.Trim());
+                }
+            }
+        }
+        catch { /* Ignore corrupted or unrelated json files */ }
+    }
+
+    Console.WriteLine($"Compiled {blacklist.Count} unique English questions for deduplication.");
+
+    // Custom system prompt if supplied
+    string customPromptRules = string.Empty;
+    if (!string.IsNullOrWhiteSpace(promptRulesPath) && File.Exists(promptRulesPath))
+    {
+        Console.WriteLine($"Loading custom guidelines from: {promptRulesPath}...");
+        customPromptRules = await File.ReadAllTextAsync(promptRulesPath) + "\n\n";
+    }
+
+    string strictRules =
+        "CORE SOURCING AND STRUCTURAL RULES:\n" +
+        "- INTERNET SEARCH AND SOURCING REQUIREMENT: Search the internet across reputable US and European technical websites, official language specifications, and top interview repositories to find genuine interview questions and practical problems.\n" +
+        "- ABSOLUTE PROHIBITION ON BACKTICKS: NEVER use the backtick symbol (`) anywhere in the text. For code elements, function names, types, and keywords, ALWAYS use single quotes ('...') or double quotes (\"...\").\n" +
+        "- The correct answer keys MUST follow a strict cyclic sequence across consecutive question_ids: a, b, c, d, a, b, c, d...\n" +
+        "- Explanations must be approximately 5 sentences long, clearly detailing why the correct answer is right and why distractors are wrong.\n" +
+        "- All answer choices (a, b, c, d) must be of comparable length and complexity.\n" +
+        "- Do NOT include any markdown code fence blocks (like ```json). Return ONLY the raw JSON array.";
+
+    var writeOptions = new JsonSerializerOptions
+    {
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    string[] targetLevels = new[] { "Junior", "Middle" };
+    int currentStartId = startingId;
+
+    foreach (var currentLevel in targetLevels)
+    {
+        int endId = currentStartId + countPerLevel - 1;
+        Console.WriteLine("\n==================================================================");
+        Console.WriteLine($"  STARTING LEVEL: {currentLevel.ToUpperInvariant()} (ID Range: {currentStartId} to {endId})");
+        Console.WriteLine("==================================================================");
+
+        // ---------------------------------------------------------
+        // STEP 1: GENERATE IN ENGLISH ONLY
+        // ---------------------------------------------------------
+        Console.WriteLine($"\n[1/4] Generating {countPerLevel} questions in ENGLISH ONLY for level '{currentLevel}'...");
+
+        string blacklistPrompt = blacklist.Count > 0
+            ? "\nCRITICAL: DO NOT DUPLICATE OR REPHRASE ANY OF THESE PRE-EXISTING QUESTIONS:\n" +
+              string.Join("\n", blacklist.TakeLast(60).Select((q, idx) => $"{idx + 1}. {q}"))
+            : string.Empty;
+
+        string genEnPrompt =
+            $"{customPromptRules}" +
+            $"You are an expert technical interviewer and educator.\n" +
+            $"TASK SPECIFICATION:\n" +
+            $"- Target Topic: '{topicNameEn}' (Group Index: {gIdx})\n" +
+            $"- Difficulty Level: '{currentLevel}'\n" +
+            $"- Question ID Range: {currentStartId} to {endId} (Total: {countPerLevel} questions)\n" +
+            $"- Language: English only ('lang': 'en')\n\n" +
+            $"- WEB SEARCH INSTRUCTION: Search the internet across authentic US and European tech company interview resources, developer portals, and official documentation to select high-value, realistic questions.\n" +
+            $"{strictRules}\n" +
+            $"{blacklistPrompt}\n\n" +
+            $"Return ONLY a valid JSON array of objects with keys: " +
+            $"\"question_id\", \"lang\", \"level\", \"group_index\", \"question\", \"answer_a\", \"answer_b\", \"answer_c\", \"answer_d\", \"answer_win\", \"explanation\".";
+
+        string rawEn = await CallAiAsync(genEnPrompt, providerType, apiToken, selectedModel, localApiUrl);
+        string cleanedEn = CleanJsonString(rawEn);
+
+        var enQuestions = JsonSerializer.Deserialize<List<QuestionItem>>(cleanedEn, options);
+        if (enQuestions == null || enQuestions.Count == 0)
+        {
+            Console.WriteLine($"[ERROR] Failed to generate English questions for level '{currentLevel}'.");
+            Environment.Exit(1);
+        }
+
+        // ---------------------------------------------------------
+        // STEP 2: TECHNICAL & GRAMMAR REVIEW
+        // ---------------------------------------------------------
+        Console.WriteLine($"\n[2/4] Performing technical accuracy and grammar review on English draft...");
+
+        string reviewPrompt =
+            $"You are an expert technical proofreader and senior engineer.\n" +
+            $"Review and refine the following JSON array of technical interview questions.\n" +
+            $"Verify factual correctness, clarity, grammar, and ensure all strict rules are adhered to:\n" +
+            $"- Check that NO backticks (`) are used anywhere (replace them with single quotes '...').\n" +
+            $"- Ensure explanations are approximately 5 sentences long.\n" +
+            $"- Ensure answer_win matches the correct answer and strictly follows the cyclic pattern (a, b, c, d...).\n" +
+            $"- Maintain the exact question_id, level ('{currentLevel}'), and group_index ({gIdx}).\n\n" +
+            $"{strictRules}\n\n" +
+            $"Questions to review:\n" +
+            $"{JsonSerializer.Serialize(enQuestions, writeOptions)}\n\n" +
+            $"Return ONLY the updated JSON array without any markdown wrappers.";
+
+        string rawReviewed = await CallAiAsync(reviewPrompt, providerType, apiToken, selectedModel, localApiUrl);
+        string cleanedReviewed = CleanJsonString(rawReviewed);
+
+        var reviewedEnQuestions = JsonSerializer.Deserialize<List<QuestionItem>>(cleanedReviewed, options);
+        if (reviewedEnQuestions == null || reviewedEnQuestions.Count == 0)
+        {
+            Console.WriteLine("[WARN] Review deserialization failed. Falling back to unreviewed English batch.");
+            reviewedEnQuestions = enQuestions;
+        }
+
+        // ---------------------------------------------------------
+        // STEP 3: SAVE INTERMEDIATE DRAFT
+        // ---------------------------------------------------------
+        string draftFileName = $"draft_{currentLevel.ToLowerInvariant()}_en.json";
+        string draftPath = Path.Combine(directory, draftFileName);
+        await File.WriteAllTextAsync(draftPath, JsonSerializer.Serialize(reviewedEnQuestions, writeOptions));
+        Console.WriteLine($"\n[3/4] Intermediate draft saved successfully: {draftPath}");
+
+        // ---------------------------------------------------------
+        // STEP 4: TRANSLATE ONE-BY-ONE INTO 4 LANGUAGES (uk, de, es, fr)
+        // ---------------------------------------------------------
+        Console.WriteLine($"\n[4/4] Translating questions one by one into 4 languages (uk, de, es, fr)...");
+        var completeLevelQuestions = new List<QuestionItem>();
+
+        foreach (var enQuestion in reviewedEnQuestions)
+        {
+            completeLevelQuestions.Add(enQuestion); // Add the validated English question
+            Console.WriteLine($"\n  -> Translating Question ID {enQuestion.QuestionId} into [uk, de, es, fr]...");
+
+            string translatePrompt =
+                $"Translate the following single quiz question into exactly 4 languages: 'uk', 'de', 'es', 'fr'.\n" +
+                $"Follow these localized topic names for each language:\n{topicGuidelines}\n\n" +
+                $"STRICT TRANSLATION RULES:\n" +
+                $"- Maintain the EXACT question_id ({enQuestion.QuestionId}), group_index ({gIdx}), level ('{currentLevel}'), and answer_win ('{enQuestion.AnswerWin}') across all translations.\n" +
+                $"- Use natural, standard technical terminology for each language.\n" +
+                $"- NO BACKTICKS: Use single quotes ('...') for code symbols.\n" +
+                $"- Keep explanation depth (~5 sentences) explaining the correct choice and why others are wrong.\n\n" +
+                $"Source English Question:\n" +
+                $"{JsonSerializer.Serialize(enQuestion, writeOptions)}\n\n" +
+                $"Return ONLY a JSON array containing the 4 translated objects (one each for uk, de, es, fr).";
+
+            try
+            {
+                string rawTranslation = await CallAiAsync(translatePrompt, providerType, apiToken, selectedModel, localApiUrl);
+                string cleanedTranslation = CleanJsonString(rawTranslation);
+                var translatedItems = JsonSerializer.Deserialize<List<QuestionItem>>(cleanedTranslation, options);
+
+                if (translatedItems != null && translatedItems.Count > 0)
+                {
+                    completeLevelQuestions.AddRange(translatedItems);
+                    Console.WriteLine("    Done translating question!");
+                }
+                else
+                {
+                    Console.WriteLine("[WARN] Received empty translation array.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERROR] Translation failed: {ex.Message}");
+            }
+        }
+
+        // Save complete level output file
+        int width = Math.Max(4, currentStartId.ToString().Length);
+        string paddedId = currentStartId.ToString("D" + width);
+        string levelOutputFileName = $"questions_{gIdx}_{paddedId}_{currentLevel.ToLowerInvariant()}.json";
+        string levelOutputPath = Path.Combine(directory, levelOutputFileName);
+
+        await File.WriteAllTextAsync(levelOutputPath, JsonSerializer.Serialize(completeLevelQuestions, writeOptions));
+        Console.WriteLine($"\n[SUCCESS] Completed level '{currentLevel}'!");
+        Console.WriteLine($"Saved {completeLevelQuestions.Count} records to: {levelOutputPath}");
+
+        // Update blacklist and startId for the next level
+        blacklist.AddRange(reviewedEnQuestions.Select(q => q.Question.Trim()));
+        currentStartId += countPerLevel;
+    }
+
+    Console.WriteLine("\n==================================================================");
+    Console.WriteLine("  PIPELINE FINISHED: Junior and Middle levels generated successfully!");
+    Console.WriteLine("==================================================================");
 }
 
 // ==========================================
@@ -449,8 +1082,8 @@ async Task<(string FullPrompt, string OutputDirectory)> BuildPromptAsync(string 
         $"- Question ID Range : {sId} to {endId} (Total: {qCount} unique questions)\n" +
         $"- Difficulty Level  : '{qLevel}'\n\n" +
         $"CORE SOURCING AND STRUCTURAL RULES:\n" +
+        $"- INTERNET SEARCH AND SOURCING REQUIREMENT: Actively perform an internet search across reputable US and European technical resources, official standards (ISO, IEEE, W3C), official documentation, and proven interview archives (e.g., LeetCode, GitHub technical interview collections, cppreference, MDN, Dev.to). Ground questions in real-world interview scenarios and actual industry practices from leading US and EU tech companies.\n" +
         $"- STRICT QUESTION UNIQUENESS: Every question MUST be 100% distinct in concept, scenario, code snippet, and problem statement. Absolutely NO duplicate questions, minor rephrasings, or semantic repetitions across different question_ids, especially within the same group index ({gIdx}) and difficulty level ('{qLevel}'). Each question_id must test a completely different aspect or subtopic.\n" +
-        $"- Source questions and conceptual depth from reputable US and European technical websites, literature, and official standards.\n" +
         $"- Correct and incorrect answer choices must be of comparable length and complexity so that the correct answer is not obvious.\n" +
         $"- Explanations must be approximately 5 sentences long, clearly detailing why the correct answer is right and why distractors are wrong.\n" +
         $"- ABSOLUTE PROHIBITION ON BACKTICKS: NEVER use the backtick symbol (`) anywhere in the text. For code elements, function names, types, and keywords (like 'std::vector', 'push_back', 'const', 'int'), ALWAYS use single quotes ('...') or double quotes (\"...\").\n" +
