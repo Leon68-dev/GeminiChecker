@@ -1,8 +1,5 @@
-﻿using Mscc.GenerativeAI;
-using Mscc.GenerativeAI.Types;
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Encodings.Web;
@@ -18,14 +15,12 @@ if (args.Length < 1)
     Console.WriteLine("  Sort questions by ID:     GeminiChecker <input_file_path> --sort (or -srt)");
     Console.WriteLine("  Split questions:          GeminiChecker <input_file_path> [--split (or -spl)] [--count <int>]");
     Console.WriteLine("  Merge & Analyze folder:   GeminiChecker <input_directory_path>");
-    Console.WriteLine("  Verify file with Gemini:  GeminiChecker <input_file_path> --check (or -c) --key <api_key> [--model <model_name>] [--prompt <prompt_file_path>]");
     Console.WriteLine("  Export prompt to file:    GeminiChecker --save-prompt (or -sp, --dump-prompt, -dp) --topics <topics_json_path> --group <index> --count <int> --level <Junior/Middle> --start-id <int> [--prompt <prompt_file_path>]");
     Console.WriteLine("\nOptions:");
     Console.WriteLine("  -st, --stat, --stats      Show detailed question statistics (totals, per group, per language).");
     Console.WriteLine("  -a, --analyze             Alias for statistics and JSON validation.");
     Console.WriteLine("  -srt, --sort              Sort questions in the file by question_id (and language) and save to *_sorted.json.");
     Console.WriteLine("  -spl, --split             Explicitly trigger split mode on the specified file.");
-    Console.WriteLine("  -c, --check               Trigger Gemini verification/correction mode on the specified file.");
     Console.WriteLine("  -sp, --save-prompt        Assemble and save the complete generation prompt to a text file without calling API.");
     Console.WriteLine("  -dp, --dump-prompt        Alias for --save-prompt.");
     Console.WriteLine("  -t, --topics <path>       Path to topics.json file for subject matter matching.");
@@ -33,8 +28,6 @@ if (args.Length < 1)
     Console.WriteLine("  -cnt, --count <int>       Number of unique questions per chunk / level (default: 8).");
     Console.WriteLine("  -l, --level <string>      Difficulty level (e.g., Junior, Middle, Senior) (default: Junior).");
     Console.WriteLine("  -s, --start-id <int>      Starting question_id for newly generated questions (default: 1).");
-    Console.WriteLine("  -k, --key <api_key>       Your Google AI Studio API Key (fallback: GEMINI_API_KEY environment variable).");
-    Console.WriteLine("  -m, --model <model_name>  Select AI model name (default: gemini-3.6-flash).");
     Console.WriteLine("  -p, --prompt <file_path>  Path to an external text file containing custom system prompt rules.");
     Console.WriteLine("\nExamples:");
     Console.WriteLine("  1. View question statistics:");
@@ -43,9 +36,7 @@ if (args.Length < 1)
     Console.WriteLine("     GeminiChecker questions.json --split --count 8");
     Console.WriteLine("  3. Merge chunks and analyze directory:");
     Console.WriteLine("     GeminiChecker ./chunks");
-    Console.WriteLine("  4. Verify questions file with Gemini:");
-    Console.WriteLine("     GeminiChecker questions_0_0001.json --check --key <api_key>");
-    Console.WriteLine("  5. Export generation prompt to file:");
+    Console.WriteLine("  4. Export generation prompt to file:");
     Console.WriteLine("     GeminiChecker --save-prompt --topics topics.json --group 0 --count 8 --level Junior --start-id 1");
     return;
 }
@@ -57,9 +48,6 @@ bool isSavePromptMode = args.Contains("--save-prompt", StringComparer.OrdinalIgn
                         args.Contains("-sp", StringComparer.OrdinalIgnoreCase) ||
                         args.Contains("--dump-prompt", StringComparer.OrdinalIgnoreCase) ||
                         args.Contains("-dp", StringComparer.OrdinalIgnoreCase);
-
-bool isCheckMode = args.Contains("--check", StringComparer.OrdinalIgnoreCase) ||
-                   args.Contains("-c", StringComparer.OrdinalIgnoreCase);
 
 bool isSplitMode = args.Contains("--split", StringComparer.OrdinalIgnoreCase) ||
                    args.Contains("-spl", StringComparer.OrdinalIgnoreCase);
@@ -79,8 +67,6 @@ int count = 8;
 string level = "Junior";
 int startId = 1;
 string promptFilePath = string.Empty;
-string apiKey = string.Empty;
-string modelName = "gemini-3.6-flash";
 string inputPath = null;
 
 // Search for topics spec flag
@@ -132,37 +118,12 @@ if (promptIndex != -1 && promptIndex + 1 < args.Length)
     promptFilePath = args[promptIndex + 1];
 }
 
-// Search for key flag
-int keyIndex = Array.FindIndex(args, arg => arg.Equals("--key", StringComparison.OrdinalIgnoreCase) ||
-                                           arg.Equals("-k", StringComparison.OrdinalIgnoreCase));
-if (keyIndex != -1 && keyIndex + 1 < args.Length)
-{
-    apiKey = args[keyIndex + 1];
-}
-else
-{
-    // Fallback to environment variable for convenience
-    apiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY") ?? string.Empty;
-}
-
-// Search for model flag
-int modelIndex = Array.FindIndex(args, arg => arg.Equals("--model", StringComparison.OrdinalIgnoreCase) ||
-                                             arg.Equals("-m", StringComparison.OrdinalIgnoreCase));
-if (modelIndex != -1 && modelIndex + 1 < args.Length)
-{
-    modelName = args[modelIndex + 1];
-}
-
 // Extract the input file or directory path (skip flags and their values)
 for (int i = 0; i < args.Length; i++)
 {
     string arg = args[i];
     if (arg.Equals("--save-prompt", StringComparison.OrdinalIgnoreCase) || arg.Equals("-sp", StringComparison.OrdinalIgnoreCase) ||
         arg.Equals("--dump-prompt", StringComparison.OrdinalIgnoreCase) || arg.Equals("-dp", StringComparison.OrdinalIgnoreCase))
-    {
-        continue;
-    }
-    if (arg.Equals("--check", StringComparison.OrdinalIgnoreCase) || arg.Equals("-c", StringComparison.OrdinalIgnoreCase))
     {
         continue;
     }
@@ -212,16 +173,6 @@ for (int i = 0; i < args.Length; i++)
         i++; // Skip its value
         continue;
     }
-    if (arg.Equals("--key", StringComparison.OrdinalIgnoreCase) || arg.Equals("-k", StringComparison.OrdinalIgnoreCase))
-    {
-        i++; // Skip its value
-        continue;
-    }
-    if (arg.Equals("--model", StringComparison.OrdinalIgnoreCase) || arg.Equals("-m", StringComparison.OrdinalIgnoreCase))
-    {
-        i++; // Skip its value
-        continue;
-    }
 
     inputPath = arg;
     break;
@@ -255,15 +206,6 @@ else if (isSortMode)
         Environment.Exit(1);
     }
     await SortQuestionsByIdAsync(inputPath);
-}
-else if (isCheckMode)
-{
-    if (!File.Exists(inputPath))
-    {
-        Console.WriteLine($"Error: File '{inputPath}' not found for Gemini verification.");
-        Environment.Exit(1);
-    }
-    await VerifyWithGeminiAsync(inputPath, apiKey, modelName, promptFilePath);
 }
 else if (isSplitMode)
 {
@@ -664,192 +606,7 @@ async Task SavePromptToFileAsync(string inPath, string tPath, int gIdx, int qCou
 }
 
 // ==========================================
-// 3. GEMINI VERIFICATION LOGIC
-// ==========================================
-async Task VerifyWithGeminiAsync(string filePath, string apiToken, string selectedModel, string promptPath)
-{
-    if (string.IsNullOrWhiteSpace(apiToken))
-    {
-        Console.WriteLine("Error: Gemini API Key is missing. Please provide it using --key / -k option or set GEMINI_API_KEY environment variable.");
-        Environment.Exit(1);
-    }
-
-    try
-    {
-        Console.WriteLine($"Reading file: {filePath}...");
-        string originalJson = CleanJsonString(await File.ReadAllTextAsync(filePath));
-
-        // Strict non-negotiable format rules that ensure Gemini never breaks the output JSON structure
-        string strictFormatRules =
-            "CRITICAL INSTRUCTIONS FOR OUTPUT FORMAT & EXPLANATIONS:\n" +
-            "1. You MUST return ALL questions and ALL translations from the input. Do NOT abbreviate, truncate, or omit any questions, languages, or fields.\n" +
-            "2. The output JSON array must contain the exact same number of items as the input, with all fields preserved and only corrected where necessary.\n" +
-            "3. AUDIT & REWRITE EXPLANATIONS: Ensure that 'explanation' is an educational, standalone technical reference explaining the underlying concept (~5 sentences). Strip and rephrase ANY references to option letters, answer labels, or choices ('Option A', 'Choice B', 'the correct answer', 'the given option', etc.). The explanation must explain the technical mechanics directly without meta-commentary on the quiz options.\n" +
-            "4. NO BACKTICKS: Replace any backticks (`) with single quotes ('...').\n" +
-            "5. Output ONLY the updated JSON array. Do NOT write any explanations, conversational filler, greetings, introductions, or markdown block wrapping (like ```json). Return just the raw JSON content.";
-
-        string systemPrompt;
-
-        // Load custom prompt if file path is provided, otherwise fallback to default proofreader prompt
-        if (!string.IsNullOrWhiteSpace(promptPath))
-        {
-            if (!File.Exists(promptPath))
-            {
-                Console.WriteLine($"Error: Prompt file '{promptPath}' not found.");
-                Environment.Exit(1);
-            }
-            Console.WriteLine($"Loading system prompt rules from: {promptPath}...");
-            string customRules = await File.ReadAllTextAsync(promptPath);
-
-            // Integrate custom domain rules with the strict formatting requirements
-            systemPrompt =
-                "You are an expert educator, researcher, and proofreader.\n" +
-                "Evaluate the questions using the following specific criteria and subject matter rules:\n" +
-                $"{customRules}\n\n" +
-                "Additionally, check for spelling, grammar, punctuation, and clear phrasing in all languages.\n\n" +
-                strictFormatRules;
-        }
-        else
-        {
-            Console.WriteLine("No custom prompt specified. Using default proofreader prompt...");
-            systemPrompt =
-                "You are an expert educator, researcher, and proofreader. " +
-                "Your task is to review the following JSON array of quiz questions.\n" +
-                "1. Check for spelling, grammar, punctuation, and clear phrasing in all languages.\n" +
-                "2. Check for factual, logical, and conceptual correctness of the questions, answer choices, and explanations.\n" +
-                "3. Enforce standalone educational explanations: explain WHY the underlying concept/result works mechanically, without referencing option letters or correct/incorrect choices.\n" +
-                "4. Correct any errors or inaccuracies you find.\n\n" +
-                strictFormatRules;
-        }
-
-        Console.WriteLine($"Connecting to Gemini API using model: {selectedModel}...");
-        var googleAI = new GoogleAI(apiKey: apiToken);
-        var model = googleAI.GenerativeModel(model: selectedModel);
-
-        // Configure generation parameters to unlock the maximum output capacity of 65,536 tokens
-        var generationConfig = new GenerationConfig
-        {
-            MaxOutputTokens = 65536
-        };
-
-        string fullPrompt = $"{systemPrompt}\n\nHere is the JSON to check:\n{originalJson}";
-
-        // Start request and track elapsed execution time
-        Console.WriteLine("Sending data to Gemini for review. Please wait...");
-        var stopwatch = Stopwatch.StartNew();
-        var verifyTask = model.GenerateContent(fullPrompt, generationConfig: generationConfig);
-
-        Console.Write("Elapsed: 00:00");
-
-        while (!verifyTask.IsCompleted)
-        {
-            await Task.WhenAny(verifyTask, Task.Delay(1000));
-            if (!verifyTask.IsCompleted)
-            {
-                Console.Write($"\rElapsed: {stopwatch.Elapsed:mm\\:ss}   ");
-            }
-        }
-
-        stopwatch.Stop();
-        Console.WriteLine($"\rCompleted in: {stopwatch.Elapsed:mm\\:ss}!      ");
-
-        var response = await verifyTask;
-
-        if (response == null || string.IsNullOrWhiteSpace(response.Text))
-        {
-            Console.WriteLine("Error: Gemini returned an empty response or the request was blocked.");
-            Environment.Exit(1);
-        }
-
-        string rawResponse = response.Text.Trim();
-        string processedJson = CleanJsonString(rawResponse);
-
-        // Check if the response contains a JSON array
-        if (!processedJson.StartsWith("[") || !processedJson.EndsWith("]"))
-        {
-            // Check if Gemini returned conversational text indicating that everything is already correct
-            string lowerText = rawResponse.ToLowerInvariant();
-            bool isAlreadyCorrect = lowerText.Contains("correct") ||
-                                     lowerText.Contains("no changes") ||
-                                     lowerText.Contains("looks good") ||
-                                     lowerText.Contains("no errors") ||
-                                     lowerText.Contains("perfect") ||
-                                     lowerText.Contains("already");
-
-            if (isAlreadyCorrect)
-            {
-                Console.WriteLine("No changes detected.");
-                return;
-            }
-
-            Console.WriteLine("\n[ERROR] Gemini did not return a valid JSON array.");
-            Console.WriteLine("Response received from Gemini:");
-            Console.WriteLine(rawResponse);
-            Environment.Exit(1);
-        }
-
-        // Verify if it is a valid JSON before saving
-        try
-        {
-            var docOptions = new JsonDocumentOptions
-            {
-                AllowTrailingCommas = true,
-                CommentHandling = JsonCommentHandling.Skip
-            };
-            using var doc = JsonDocument.Parse(processedJson, docOptions);
-        }
-        catch (JsonException ex)
-        {
-            Console.WriteLine("\n[ERROR] Response from Gemini is not a valid JSON structure.");
-            Console.WriteLine($"Details: {ex.Message}");
-            if (ex.LineNumber.HasValue)
-            {
-                Console.WriteLine($"Line: {ex.LineNumber.Value}, Position: {ex.BytePositionInLine}");
-            }
-
-            bool isQuestionsDump = response.Text.Contains("question_id") || response.Text.Contains("explanation");
-            if (!isQuestionsDump)
-            {
-                Console.WriteLine("\nRaw response received from Gemini (which is not a JSON array of questions):");
-                Console.WriteLine(response.Text.Trim());
-            }
-            else
-            {
-                Console.WriteLine("\n(The response contains a corrupted questions array. To avoid spamming, the raw JSON is not printed.)");
-            }
-
-            Console.WriteLine("Please fix the prompt rules or verify the source data size.");
-            Environment.Exit(1);
-        }
-
-        // Check if any changes were made
-        if (originalJson.Trim() == processedJson)
-        {
-            Console.WriteLine("No changes detected.");
-        }
-        else
-        {
-            // Define path for the new file, e.g. questions_0_1_chn.json
-            string directory = Path.GetDirectoryName(filePath) ?? string.Empty;
-            string fileNameWithoutExt = Path.GetFileNameWithoutExtension(filePath);
-            string extension = Path.GetExtension(filePath);
-
-            string outputFileName = $"{fileNameWithoutExt}_chn{extension}";
-            string outputPath = Path.Combine(directory, outputFileName);
-
-            await File.WriteAllTextAsync(outputPath, processedJson);
-            Console.WriteLine($"Changes detected! Corrected file saved to: {outputFileName}");
-        }
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"An error occurred: {ex.Message}");
-        Environment.Exit(1);
-    }
-}
-
-// ==========================================
-// 4. MERGE AND ANALYZE LOGIC
+// 3. MERGE AND ANALYZE LOGIC
 // ==========================================
 async Task MergeAndAnalyzeAsync(string directoryPath)
 {
@@ -980,7 +737,7 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
 }
 
 // ==========================================
-// 5. SPLIT LOGIC
+// 4. SPLIT LOGIC
 // ==========================================
 async Task SplitQuestionsAsync(string filePath, int chunkSize)
 {
@@ -1063,7 +820,7 @@ async Task SplitQuestionsAsync(string filePath, int chunkSize)
 }
 
 // ==========================================
-// 6. JSON ANALYSIS LOGIC
+// 5. JSON ANALYSIS LOGIC
 // ==========================================
 async Task AnalyzeJsonFileAsync(string filePath)
 {
@@ -1113,7 +870,7 @@ async Task AnalyzeJsonFileAsync(string filePath)
 }
 
 // ==========================================
-// 7. SORT QUESTIONS BY ID LOGIC
+// 6. SORT QUESTIONS BY ID LOGIC
 // ==========================================
 async Task SortQuestionsByIdAsync(string filePath)
 {
