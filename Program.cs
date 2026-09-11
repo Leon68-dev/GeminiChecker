@@ -1015,7 +1015,8 @@ async Task RunInterviewPipelineAsync(
     string strictRules =
         "CORE SOURCING AND STRUCTURAL RULES:\n" +
         "- ABSOLUTE PROHIBITION ON BACKTICKS: NEVER use the backtick symbol (`) anywhere in the text. For code elements, function names, types, and keywords, ALWAYS use single quotes ('...') or double quotes (\"...\").\n" +
-        "- STANDALONE EXPLANATION REQUIREMENT: The 'explanation' must be approximately 5 sentences long, providing a self-contained technical explanation of the underlying concept, facts, and mechanics. CRITICAL: It MUST NEVER mention option letters or labels (do NOT say 'Option A', 'Choice B', 'answer_win', 'correct answer', etc.). Explain the subject factually and neutrally as a standalone educational reference.\n" +
+        "- STANDALONE EDUCATIONAL EXPLANATION REQUIREMENT (STRICT): The 'explanation' must be approximately 5 sentences long, providing a self-contained, authoritative technical explanation of the underlying concept, language rules, runtime behavior, and mechanics that make this outcome true.\n" +
+        "- ABSOLUTE BAN ON OPTION AND META REFERENCES: The 'explanation' MUST NEVER mention option letters, labels, or relative choice positioning (STRICTLY FORBIDDEN: 'Option A', 'Choice B', 'answer_win', 'the correct choice', 'the right answer', 'the first option', 'the distractors'). Explain the technical mechanics neutrally and independently as a standalone reference, without commenting on the quiz options.\n" +
         "- All answer choices (a, b, c, d) must be of comparable length and complexity.\n" +
         "- Do NOT include any markdown code fence blocks (like ```json). Return ONLY the raw JSON array.";
 
@@ -1138,7 +1139,7 @@ async Task RunInterviewPipelineAsync(
             $"{searchContext}" +
             $"{strictRules}\n" +
             $"- NO INTERNAL MONOLOGUE: Do NOT output <thought> tags or reasoning text.\n" +
-            $"- EXPLANATION RULE: The explanation MUST be completely independent of answer labels (NEVER say 'Option {expectedKey} is correct' or mention options). Write an educational technical summary of the concept itself.\n" +
+            $"- EXPLANATION RULE: The explanation MUST be completely independent of answer labels (NEVER say 'Option {expectedKey} is correct', 'Choice {expectedKey}', or 'The correct answer is...'). Write an educational technical summary of the concept, mechanics, and rules in principle.\n" +
             $"{blacklistPrompt}\n\n" +
             $"Return ONLY a single valid JSON array containing exactly 1 object with keys: " +
             $"\"question_id\", \"lang\", \"level\", \"group_index\", \"question\", \"answer_a\", \"answer_b\", \"answer_c\", \"answer_d\", \"answer_win\", \"explanation\". Begin directly with '[' and end with ']'.";
@@ -1195,7 +1196,7 @@ async Task RunInterviewPipelineAsync(
         $"Review and refine the following JSON array of technical interview questions.\n" +
         $"Verify factual correctness, clarity, grammar, and ensure all strict rules are adhered to:\n" +
         $"- Check that NO backticks (`) are used anywhere (replace them with single quotes '...').\n" +
-        $"- Ensure explanations are approximately 5 sentences long and COMPLETELY STANDALONE (verify that NO references to 'Option A', 'Choice B', 'answer_win', or answer letters exist in the explanation).\n" +
+        $"- AUDIT EXPLANATIONS: Ensure explanations are approximately 5 sentences long and COMPLETELY STANDALONE. Actively strip and rewrite any sentences that mention options or answer keys ('Option A', 'Choice B', 'the correct answer', 'the right option', 'distractors'). The explanation must neutrally describe the underlying mechanism, syntax, or architectural rule that makes this true in general.\n" +
         $"- Ensure answer_win matches the correct answer and strictly follows the cyclic pattern (a, b, c, d...).\n" +
         $"- Maintain the exact question_id, level ('{normalizedLevel}'), and group_index ({gIdx}).\n\n" +
         $"{strictRules}\n\n" +
@@ -1243,7 +1244,7 @@ async Task RunInterviewPipelineAsync(
             $"- Maintain the EXACT question_id ({enQuestion.QuestionId}), group_index ({gIdx}), level ('{normalizedLevel}'), and answer_win ('{enQuestion.AnswerWin}') across all translations.\n" +
             $"- Use natural, standard technical terminology for each language.\n" +
             $"- NO BACKTICKS: Use single quotes ('...') for code symbols.\n" +
-            $"- Standalone explanation: Keep explanation depth (~5 sentences) explaining the concept factually without referencing option letters.\n\n" +
+            $"- STANDALONE EXPLANATION: Keep explanation depth (~5 sentences) explaining the concept factually. Do NOT introduce phrases like 'Правильна відповідь:', 'Option A', 'Die richtige Option' in any language.\n\n" +
             $"Source English Question:\n" +
             $"{JsonSerializer.Serialize(enQuestion, writeOptions)}\n\n" +
             $"Return ONLY a JSON array containing the 4 translated objects (one each for uk, de, es, fr).";
@@ -1397,7 +1398,8 @@ async Task<(string FullPrompt, string OutputDirectory)> BuildPromptAsync(string 
         $"- INTERNET SEARCH AND SOURCING REQUIREMENT: Actively perform an internet search across reputable US and European technical resources, official standards (ISO, IEEE, W3C), official documentation, and proven interview archives (e.g., LeetCode, GitHub technical interview collections, cppreference, MDN, Dev.to). Ground questions in real-world interview scenarios and actual industry practices from leading US and EU tech companies.\n" +
         $"- STRICT QUESTION UNIQUENESS: Every question MUST be 100% distinct in concept, scenario, code snippet, and problem statement. Absolutely NO duplicate questions, minor rephrasings, or semantic repetitions across different question_ids, especially within the same group index ({gIdx}) and difficulty level ('{qLevel}'). Each question_id must test a completely different aspect or subtopic.\n" +
         $"- Correct and incorrect answer choices must be of comparable length and complexity so that the correct answer is not obvious.\n" +
-        $"- Explanations must be approximately 5 sentences long, clearly detailing why the correct answer is right and why distractors are wrong.\n" +
+        $"- STANDALONE EDUCATIONAL EXPLANATION (CRITICAL): The 'explanation' must be approximately 5 sentences long, explaining the core technical concepts, rules, behavior, and underlying mechanics that determine this outcome.\n" +
+        $"- ABSOLUTE BAN ON OPTION/META REFERENCES: The explanation MUST NEVER mention option letters, labels, or meta-references (STRICTLY FORBIDDEN: 'Option A', 'Choice B', 'answer_win', 'the correct option', 'the right answer', 'the incorrect choices', 'distractors'). Explain the subject neutrally and factually as a standalone textbook or documentation reference—explaining HOW and WHY the technology behaves this way in principle, so that any engineer understands the true mechanics without looking at the quiz options.\n" +
         $"- ABSOLUTE PROHIBITION ON BACKTICKS: NEVER use the backtick symbol (`) anywhere in the text. For code elements, function names, types, and keywords (like 'std::vector', 'push_back', 'const', 'int'), ALWAYS use single quotes ('...') or double quotes (\"...\").\n" +
         $"- The correct answer keys MUST follow a simple rotating cycle across consecutive question_ids: a, b, c, d, a, b, c, d...\n\n" +
         $"For EACH unique question_id, you must generate exactly 5 translations (one for each language: en, uk, de, es, fr).\n" +
@@ -1419,7 +1421,7 @@ async Task<(string FullPrompt, string OutputDirectory)> BuildPromptAsync(string 
         $"    \"answer_c\": \"Third option\",\n" +
         $"    \"answer_d\": \"Fourth option\",\n" +
         $"    \"answer_win\": \"a\",\n" +
-        $"    \"explanation\": \"Detailed explanation here (approx. 5 sentences).\"\n" +
+        $"    \"explanation\": \"Detailed standalone educational explanation here (approx. 5 sentences).\"\n" +
         $"  }}\n" +
         $"]\n\n" +
         $"Field Details:\n" +
@@ -1430,7 +1432,7 @@ async Task<(string FullPrompt, string OutputDirectory)> BuildPromptAsync(string 
         $"5. 'question' (string): Must be unique, clear, factual, and accurate.\n" +
         $"6. 'answer_a', 'answer_b', 'answer_c', 'answer_d' (strings): The 4 multiple choice options.\n" +
         $"7. 'answer_win' (string): Exactly 'a', 'b', 'c', or 'd'. Must be identical across all 5 translations for the same question_id and follow the cyclical pattern (a, b, c, d...).\n" +
-        $"8. 'explanation' (string): Approximately 5 sentences detailing the reasoning.\n\n" +
+        $"8. 'explanation' (string): Exactly ~5 sentences of standalone technical mechanics/facts explaining the phenomenon without ever mentioning options, letters, or answer keys.\n\n" +
         blacklistPrompt;
 
     string fullPrompt = $"{systemPrompt}\n\n{generationInstruction}";
@@ -1628,10 +1630,12 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
 
         // Strict non-negotiable format rules that ensure Gemini never breaks the output JSON structure
         string strictFormatRules =
-            "CRITICAL INSTRUCTIONS FOR OUTPUT FORMAT:\n" +
+            "CRITICAL INSTRUCTIONS FOR OUTPUT FORMAT & EXPLANATIONS:\n" +
             "1. You MUST return ALL questions and ALL translations from the input. Do NOT abbreviate, truncate, or omit any questions, languages, or fields.\n" +
             "2. The output JSON array must contain the exact same number of items as the input, with all fields preserved and only corrected where necessary.\n" +
-            "3. Output ONLY the updated JSON array. Do NOT write any explanations, conversational filler, greetings, introductions, or markdown block wrapping (like ```json). Return just the raw JSON content.";
+            "3. AUDIT & REWRITE EXPLANATIONS: Ensure that 'explanation' is an educational, standalone technical reference explaining the underlying concept (~5 sentences). Strip and rephrase ANY references to option letters, answer labels, or choices ('Option A', 'Choice B', 'the correct answer', 'the given option', etc.). The explanation must explain the technical mechanics directly without meta-commentary on the quiz options.\n" +
+            "4. NO BACKTICKS: Replace any backticks (`) with single quotes ('...').\n" +
+            "5. Output ONLY the updated JSON array. Do NOT write any explanations, conversational filler, greetings, introductions, or markdown block wrapping (like ```json). Return just the raw JSON content.";
 
         string systemPrompt;
 
@@ -1662,7 +1666,8 @@ async Task VerifyWithGeminiAsync(string filePath, string apiToken, string select
                 "Your task is to review the following JSON array of quiz questions.\n" +
                 "1. Check for spelling, grammar, punctuation, and clear phrasing in all languages.\n" +
                 "2. Check for factual, logical, and conceptual correctness of the questions, answer choices, and explanations.\n" +
-                "3. Correct any errors or inaccuracies you find.\n\n" +
+                "3. Enforce standalone educational explanations: explain WHY the underlying concept/result works mechanically, without referencing option letters or correct/incorrect choices.\n" +
+                "4. Correct any errors or inaccuracies you find.\n\n" +
                 strictFormatRules;
         }
 
@@ -1882,7 +1887,7 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
             return;
         }
 
-        // Порядок мов за замовчуванням
+        // Default language ordering
         var langOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
             { "en", 1 },
@@ -1892,7 +1897,7 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
             { "fr", 5 }
         };
 
-        // Головне сортування за question_id (1, 2, 3...) та фіксований порядок мов
+        // Primary sorting by question_id (1, 2, 3...) and fixed language order
         var orderedQuestions = allQuestions
             .GroupBy(q => new { q.GroupIndex, q.QuestionId, Lang = q.Lang.ToLower().Trim() })
             .Select(g => g.First())
@@ -2080,7 +2085,7 @@ async Task SortQuestionsByIdAsync(string filePath)
             return;
         }
 
-        // Порядок мов
+        // Language ordering
         var langOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
             { "en", 1 },
@@ -2090,7 +2095,7 @@ async Task SortQuestionsByIdAsync(string filePath)
             { "fr", 5 }
         };
 
-        // Сортування: спершу за question_id, потім за мовами, потім за group_index
+        // Sorting: first by question_id, then by language, then by group_index
         var sortedQuestions = questions
             .OrderBy(q => q.QuestionId)
             .ThenBy(q => langOrder.TryGetValue(q.Lang?.Trim() ?? string.Empty, out int ord) ? ord : 99)
