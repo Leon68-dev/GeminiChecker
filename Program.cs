@@ -15,12 +15,15 @@ if (args.Length < 1)
     Console.WriteLine("  Sort questions by ID:     GeminiChecker <input_file_path> --sort (or -srt)");
     Console.WriteLine("  Split questions:          GeminiChecker <input_file_path> [--split (or -spl)] [--count <int>]");
     Console.WriteLine("  Merge & Analyze folder:   GeminiChecker <input_directory_path>");
+    Console.WriteLine("  Check & Validate merge:   GeminiChecker <input_directory_path> --check (or -c, --chk, --validate)");
     Console.WriteLine("  Export prompt to file:    GeminiChecker --save-prompt (or -sp, --dump-prompt, -dp) --topics <topics_json_path> --group <index> --count <int> --level <Junior/Middle> --start-id <int> [--prompt <prompt_file_path>]");
     Console.WriteLine("\nOptions:");
     Console.WriteLine("  -st, --stat, --stats      Show detailed question statistics (totals, per group, per language).");
     Console.WriteLine("  -a, --analyze             Alias for statistics and JSON validation.");
     Console.WriteLine("  -srt, --sort              Sort questions in the file by question_id (and language) and save to *_sorted.json.");
     Console.WriteLine("  -spl, --split             Explicitly trigger split mode on the specified file.");
+    Console.WriteLine("  -c, --check, --chk        Perform merge check and validation without saving the output JSON file.");
+    Console.WriteLine("  --validate                Alias for --check.");
     Console.WriteLine("  -sp, --save-prompt        Assemble and save the complete generation prompt to a text file without calling API.");
     Console.WriteLine("  -dp, --dump-prompt        Alias for --save-prompt.");
     Console.WriteLine("  -t, --topics <path>       Path to topics.json file for subject matter matching.");
@@ -36,7 +39,9 @@ if (args.Length < 1)
     Console.WriteLine("     GeminiChecker questions.json --split --count 8");
     Console.WriteLine("  3. Merge chunks and analyze directory:");
     Console.WriteLine("     GeminiChecker ./chunks");
-    Console.WriteLine("  4. Export generation prompt to file:");
+    Console.WriteLine("  4. Check and validate merge without saving file:");
+    Console.WriteLine("     GeminiChecker ./chunks --check");
+    Console.WriteLine("  5. Export generation prompt to file:");
     Console.WriteLine("     GeminiChecker --save-prompt --topics topics.json --group 0 --count 8 --level Junior --start-id 1");
     return;
 }
@@ -60,6 +65,11 @@ bool isAnalyzeMode = args.Contains("--analyze", StringComparer.OrdinalIgnoreCase
                      args.Contains("--stats", StringComparer.OrdinalIgnoreCase) ||
                      args.Contains("--stat", StringComparer.OrdinalIgnoreCase) ||
                      args.Contains("-st", StringComparer.OrdinalIgnoreCase);
+
+bool isCheckMode = args.Contains("--check", StringComparer.OrdinalIgnoreCase) ||
+                   args.Contains("-c", StringComparer.OrdinalIgnoreCase) ||
+                   args.Contains("--chk", StringComparer.OrdinalIgnoreCase) ||
+                   args.Contains("--validate", StringComparer.OrdinalIgnoreCase);
 
 string topicsPath = string.Empty;
 int groupIndex = 0;
@@ -143,6 +153,13 @@ for (int i = 0; i < args.Length; i++)
     {
         continue;
     }
+    if (arg.Equals("--check", StringComparison.OrdinalIgnoreCase) ||
+        arg.Equals("-c", StringComparison.OrdinalIgnoreCase) ||
+        arg.Equals("--chk", StringComparison.OrdinalIgnoreCase) ||
+        arg.Equals("--validate", StringComparison.OrdinalIgnoreCase))
+    {
+        continue;
+    }
     if (arg.Equals("--topics", StringComparison.OrdinalIgnoreCase) || arg.Equals("-t", StringComparison.OrdinalIgnoreCase))
     {
         i++; // Skip its value
@@ -218,14 +235,21 @@ else if (isSplitMode)
 }
 else
 {
-    // Backwards-compatible auto-detect router when no explicit flags are passed
+    // Auto-detect router when processing files or directories
     if (Directory.Exists(inputPath))
     {
-        await MergeAndAnalyzeAsync(inputPath);
+        await MergeAndAnalyzeAsync(inputPath, isCheckMode);
     }
     else if (File.Exists(inputPath))
     {
-        await SplitQuestionsAsync(inputPath, count);
+        if (isCheckMode)
+        {
+            await AnalyzeJsonFileAsync(inputPath);
+        }
+        else
+        {
+            await SplitQuestionsAsync(inputPath, count);
+        }
     }
     else
     {
@@ -606,13 +630,15 @@ async Task SavePromptToFileAsync(string inPath, string tPath, int gIdx, int qCou
 }
 
 // ==========================================
-// 3. MERGE AND ANALYZE LOGIC
+// 3. MERGE AND ANALYZE LOGIC (WITH CHECK SUPPORT)
 // ==========================================
-async Task MergeAndAnalyzeAsync(string directoryPath)
+async Task MergeAndAnalyzeAsync(string directoryPath, bool isCheckOnly = false)
 {
     try
     {
-        Console.WriteLine($"Analyzing directory: {directoryPath}...");
+        Console.WriteLine(isCheckOnly
+            ? $"Validating chunk files in directory (check mode): {directoryPath}..."
+            : $"Analyzing directory: {directoryPath}...");
 
         var regex = new Regex(@"^.+_\d+_\d+(_chn)?\.json$", RegexOptions.IgnoreCase);
 
@@ -685,7 +711,9 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
 
         if (hasErrors)
         {
-            Console.WriteLine("\nMerging aborted due to JSON errors in one or more files. Please fix them and retry.");
+            Console.WriteLine(isCheckOnly
+                ? "\nValidation aborted: JSON errors found in one or more files. Please fix them and retry."
+                : "\nMerging aborted due to JSON errors in one or more files. Please fix them and retry.");
             return;
         }
 
@@ -714,15 +742,24 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
             .ThenBy(q => q.GroupIndex)
             .ToList();
 
-        string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
-        string outputFileName = $"questions_{timestamp}.json";
-        string outputFilePath = Path.Combine(directoryPath, outputFileName);
-
         var writeOptions = new JsonSerializerOptions
         {
             WriteIndented = true,
             Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
         };
+
+        // If in check mode, verify serialization without saving to file
+        if (isCheckOnly)
+        {
+            _ = JsonSerializer.Serialize(orderedQuestions, writeOptions);
+            Console.WriteLine("\n[CHECK SUCCESS] All files are valid and free of errors! No output file was saved.");
+            PrintStatistics(orderedQuestions);
+            return;
+        }
+
+        string timestamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+        string outputFileName = $"questions_{timestamp}.json";
+        string outputFilePath = Path.Combine(directoryPath, outputFileName);
 
         string outputJson = JsonSerializer.Serialize(orderedQuestions, writeOptions);
         await File.WriteAllTextAsync(outputFilePath, outputJson);
@@ -732,7 +769,7 @@ async Task MergeAndAnalyzeAsync(string directoryPath)
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"An error occurred during merging: {ex.Message}");
+        Console.WriteLine($"An error occurred during operation: {ex.Message}");
     }
 }
 
